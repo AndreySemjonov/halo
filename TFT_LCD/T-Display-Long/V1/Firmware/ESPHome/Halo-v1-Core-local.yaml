@@ -105,6 +105,18 @@ globals:
     type: int
     restore_value: no
     initial_value: '3'
+  - id: graph_transition_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: graph_transition_start_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: graph_transition_last_frame_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
   - id: last_graph_switch_ms
     type: uint32_t
     restore_value: no
@@ -202,6 +214,52 @@ select:
             - script.execute: wake_display
           else:
             - script.execute: update_display_brightness
+  - platform: template
+    name: "Graph: Transition"
+    id: graph_transition_mode
+    entity_category: "config"
+    options:
+      - "Instant"
+      - "Fade"
+      - "Wipe"
+      - "Fade + Wipe"
+    initial_option: "Fade + Wipe"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: |-
+          id(graph_transition_active) = false;
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: Transition Smoothness"
+    id: graph_transition_smoothness
+    entity_category: "config"
+    options:
+      - "Normal"
+      - "Smooth"
+      - "Very Smooth"
+    initial_option: "Smooth"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: |-
+          id(graph_transition_active) = false;
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: Transition Curve"
+    id: graph_transition_curve
+    entity_category: "config"
+    options:
+      - "Linear"
+      - "Ease Out"
+      - "Ease In-Out"
+    initial_option: "Ease In-Out"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - lambda: |-
+          id(graph_transition_active) = false;
+      - script.execute: redraw_graphs
 
 interval:
   - interval: 10s
@@ -240,6 +298,32 @@ interval:
                 if ((now_ms - id(last_graph_switch_ms)) >= interval_ms) {
                   id(advance_auto_graph_selection).execute();
                 }
+
+  - interval: 16ms
+    then:
+      - if:
+          condition:
+            lambda: 'return id(graph_transition_active);'
+          then:
+            - lambda: |-
+                const uint32_t now_ms = millis();
+                uint32_t frame_step_ms = 33;
+                if (id(graph_transition_smoothness).state == "Normal") {
+                  frame_step_ms = 50;
+                } else if (id(graph_transition_smoothness).state == "Very Smooth") {
+                  frame_step_ms = 16;
+                }
+                if (id(graph_transition_last_frame_ms) != 0 && (now_ms - id(graph_transition_last_frame_ms)) < frame_step_ms) {
+                  return;
+                }
+                id(graph_transition_last_frame_ms) = now_ms;
+                const float duration_ms = std::max(100.0f, id(graph_transition_duration).state);
+                const float elapsed_ms = static_cast<float>(now_ms - id(graph_transition_start_ms));
+                if (elapsed_ms >= duration_ms) {
+                  id(graph_transition_active) = false;
+                  id(graph_transition_last_frame_ms) = 0;
+                }
+            - script.execute: redraw_graphs
 
   - interval: 60s
     then:
@@ -397,10 +481,8 @@ touchscreen:
                 selected_metric = 8;
               }
 
-              id(selected_graph_metric) = selected_metric;
-              id(last_graph_switch_ms) = now_ms;
+              id(set_graph_metric).execute(selected_metric);
               id(touch_cooldown_until_ms) = now_ms + 250;
-              id(redraw_graphs).execute();
               return;
             }
 
@@ -652,8 +734,25 @@ script:
               break;
           }
 
-          id(selected_graph_metric) = next_metric;
+          id(set_graph_metric).execute(next_metric);
+  - id: set_graph_metric
+    mode: restart
+    parameters:
+      metric_target: int
+    then:
+      - lambda: |-
+          const int current_metric = id(selected_graph_metric);
+          const std::string transition_mode = id(graph_transition_mode).state;
+          id(selected_graph_metric) = metric_target;
           id(last_graph_switch_ms) = millis();
+          if (metric_target == current_metric || transition_mode == "Instant") {
+            id(graph_transition_active) = false;
+            id(graph_transition_last_frame_ms) = 0;
+            return;
+          }
+          id(graph_transition_start_ms) = millis();
+          id(graph_transition_last_frame_ms) = 0;
+          id(graph_transition_active) = true;
       - script.execute: redraw_graphs
   - id: show_overview_page
     mode: restart
@@ -1179,7 +1278,26 @@ script:
     mode: restart
     then:
       - lambda: |-
-          auto draw_graph = [](lv_obj_t *canvas, const std::vector<float> &hist, float baseline, lv_color_t color) {
+          auto blend_color = [](lv_color_t from, lv_color_t to, float progress) -> lv_color_t {
+            progress = std::max(0.0f, std::min(1.0f, progress));
+            const uint8_t from_r = static_cast<uint8_t>((from.full >> 11) & 0x1F);
+            const uint8_t from_g = static_cast<uint8_t>((from.full >> 5) & 0x3F);
+            const uint8_t from_b = static_cast<uint8_t>(from.full & 0x1F);
+            const uint8_t to_r = static_cast<uint8_t>((to.full >> 11) & 0x1F);
+            const uint8_t to_g = static_cast<uint8_t>((to.full >> 5) & 0x3F);
+            const uint8_t to_b = static_cast<uint8_t>(to.full & 0x1F);
+
+            const uint8_t out_r = static_cast<uint8_t>(std::round(from_r + ((to_r - from_r) * progress)));
+            const uint8_t out_g = static_cast<uint8_t>(std::round(from_g + ((to_g - from_g) * progress)));
+            const uint8_t out_b = static_cast<uint8_t>(std::round(from_b + ((to_b - from_b) * progress)));
+            return lv_color_make(
+              static_cast<uint8_t>((out_r * 255) / 31),
+              static_cast<uint8_t>((out_g * 255) / 63),
+              static_cast<uint8_t>((out_b * 255) / 31)
+            );
+          };
+
+          auto draw_graph = [&](lv_obj_t *canvas, const std::vector<float> &hist, float baseline, lv_color_t color, uint8_t graph_opa, float reveal_progress) {
             const int width = lv_obj_get_width(canvas);
             const int height = lv_obj_get_height(canvas);
             const int axis_w = 28;
@@ -1306,7 +1424,7 @@ script:
             lv_draw_line_dsc_init(&fill_dsc);
             fill_dsc.color = color;
             fill_dsc.width = 1;
-            fill_dsc.opa = LV_OPA_20;
+            fill_dsc.opa = static_cast<lv_opa_t>(std::max(0, std::min(255, static_cast<int>(graph_opa * 0.22f))));
 
             lv_draw_line_dsc_t line_dsc;
             lv_draw_line_dsc_init(&line_dsc);
@@ -1314,14 +1432,26 @@ script:
             line_dsc.width = 3;
             line_dsc.round_start = 1;
             line_dsc.round_end = 1;
+            line_dsc.opa = graph_opa;
 
             lv_point_t pts[2];
             const int point_count = hist.size();
+            const float clamped_reveal = std::max(0.0f, std::min(1.0f, reveal_progress));
+            const int reveal_limit_x = left_pad + static_cast<int>(usable_w * clamped_reveal);
             for (int i = 0; i < point_count - 1; i++) {
-              const int x1 = left_pad + (i * usable_w) / (point_count - 1);
-              const int x2 = left_pad + ((i + 1) * usable_w) / (point_count - 1);
-              const int y1 = point_y(hist[i]);
-              const int y2 = point_y(hist[i + 1]);
+              int x1 = left_pad + (i * usable_w) / (point_count - 1);
+              int x2 = left_pad + ((i + 1) * usable_w) / (point_count - 1);
+              int y1 = point_y(hist[i]);
+              int y2 = point_y(hist[i + 1]);
+
+              if (x1 > reveal_limit_x) {
+                break;
+              }
+              if (x2 > reveal_limit_x) {
+                const float segment_ratio = x2 == x1 ? 0.0f : static_cast<float>(reveal_limit_x - x1) / static_cast<float>(x2 - x1);
+                y2 = y1 + static_cast<int>((y2 - y1) * segment_ratio);
+                x2 = reveal_limit_x;
+              }
 
               lv_point_t fill_pts[2];
               fill_pts[0].x = x2;
@@ -1338,18 +1468,20 @@ script:
             }
 
             const float last_value = hist.empty() ? min_v : hist.back();
+            const int last_x = reveal_limit_x;
             const int last_y = point_y(last_value);
-            const int last_x = left_pad + usable_w;
 
             lv_draw_rect_dsc_t point_dsc;
             lv_draw_rect_dsc_init(&point_dsc);
             point_dsc.bg_color = color;
-            point_dsc.bg_opa = LV_OPA_COVER;
-            point_dsc.border_opa = LV_OPA_COVER;
+            point_dsc.bg_opa = graph_opa;
+            point_dsc.border_opa = graph_opa;
             point_dsc.border_color = lv_color_hex(0x000000);
             point_dsc.border_width = 2;
             point_dsc.radius = LV_RADIUS_CIRCLE;
-            lv_canvas_draw_rect(canvas, last_x - 4, last_y - 4, 8, 8, &point_dsc);
+            if (graph_opa > 8 && clamped_reveal > 0.02f) {
+              lv_canvas_draw_rect(canvas, last_x - 4, last_y - 4, 8, 8, &point_dsc);
+            }
           };
 
           auto delta_for = [](const std::vector<float> &hist, size_t lookback) -> float {
@@ -1624,14 +1756,36 @@ script:
           const std::string selected_header_meta = selected_window + " | " + selected_meta;
 
           const lv_color_t selected_color = graph_color_for_metric(metric, selected_value);
-          draw_graph(id(selected_graph), selected_hist_view, selected_baseline, selected_color);
+          float transition_progress = 1.0f;
+          if (id(graph_transition_active)) {
+            const float duration_ms = std::max(100.0f, id(graph_transition_duration).state);
+            const float raw_progress = std::max(0.0f, std::min(1.0f, static_cast<float>(millis() - id(graph_transition_start_ms)) / duration_ms));
+            if (id(graph_transition_curve).state == "Ease Out") {
+              transition_progress = 1.0f - ((1.0f - raw_progress) * (1.0f - raw_progress));
+            } else if (id(graph_transition_curve).state == "Ease In-Out") {
+              if (raw_progress < 0.5f) {
+                transition_progress = 2.0f * raw_progress * raw_progress;
+              } else {
+                transition_progress = 1.0f - std::pow(-2.0f * raw_progress + 2.0f, 2.0f) * 0.5f;
+              }
+            } else {
+              transition_progress = raw_progress;
+            }
+          }
+          const bool use_fade = id(graph_transition_mode).state == "Fade" || id(graph_transition_mode).state == "Fade + Wipe";
+          const bool use_wipe = id(graph_transition_mode).state == "Wipe" || id(graph_transition_mode).state == "Fade + Wipe";
+          const uint8_t selected_graph_opa = use_fade ? static_cast<uint8_t>(std::max(26.0f, std::round(transition_progress * 255.0f))) : LV_OPA_COVER;
+          const float selected_reveal_progress = use_wipe ? transition_progress : 1.0f;
+          const lv_color_t selected_text_color = use_fade ? blend_color(lv_color_hex(0x000000), selected_color, transition_progress) : selected_color;
+
+          draw_graph(id(selected_graph), selected_hist_view, selected_baseline, selected_color, selected_graph_opa, selected_reveal_progress);
           lv_label_set_text(id(selected_graph_label), selected_title.c_str());
           lv_label_set_text(id(selected_graph_meta), selected_header_meta.c_str());
           lv_label_set_text(id(selected_graph_value), selected_value_text.c_str());
-          lv_obj_set_style_text_color(id(selected_graph_label), selected_color, LV_PART_MAIN);
-          lv_obj_set_style_text_color(id(selected_graph_meta), selected_color, LV_PART_MAIN);
-          lv_obj_set_style_text_color(id(selected_graph_value), selected_color, LV_PART_MAIN);
-          set_row_palette(metric, selected_color);
+          lv_obj_set_style_text_color(id(selected_graph_label), selected_text_color, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(selected_graph_meta), selected_text_color, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(selected_graph_value), selected_text_color, LV_PART_MAIN);
+          set_row_palette(metric, selected_text_color);
 
           const float pm_value = id(pm_2_5).has_state() ? id(pm_2_5).state : 0.0f;
           const float voc_value = id(sen55_voc).has_state() ? id(sen55_voc).state : 0.0f;
@@ -1652,8 +1806,8 @@ script:
             voc_meta = "EASING";
           }
 
-          draw_graph(id(pm25_graph_large), window_for_minutes(id(pm25_history), id(pm25_graph_minutes).state, 6.0f), 25.0f, pm_color);
-          draw_graph(id(voc_graph_large), window_for_minutes(id(voc_history), id(voc_graph_minutes).state, 6.0f), 150.0f, voc_color);
+          draw_graph(id(pm25_graph_large), window_for_minutes(id(pm25_history), id(pm25_graph_minutes).state, 6.0f), 25.0f, pm_color, LV_OPA_COVER, 1.0f);
+          draw_graph(id(voc_graph_large), window_for_minutes(id(voc_history), id(voc_graph_minutes).state, 6.0f), 150.0f, voc_color, LV_OPA_COVER, 1.0f);
           const std::string pm_history_title = "PM2.5 | " + format_history_window(id(pm25_graph_minutes).state);
           const std::string voc_history_title = "VOC | " + format_history_window(id(voc_graph_minutes).state);
           char pm_buf[24];
@@ -1792,6 +1946,23 @@ number:
     step: 1
     mode: box
     on_value:
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: Transition Time"
+    id: graph_transition_duration
+    restore_value: true
+    initial_value: 350
+    min_value: 100
+    max_value: 1500
+    entity_category: "config"
+    unit_of_measurement: "ms"
+    optimistic: true
+    update_interval: never
+    step: 50
+    mode: slider
+    on_value:
+      - lambda: |-
+          id(graph_transition_active) = false;
       - script.execute: redraw_graphs
   - platform: template
     name: "Graph: CO2 Minutes"
