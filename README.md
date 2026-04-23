@@ -1,111 +1,224 @@
 ![Halo_v1](assets/Halo_v1.JPG)
 
-# HALO: The Air Quality Sensor That Smells Trouble Before You Do
+# HALO Custom Fork
 
-Welcome to HALO — your hilariously over-engineered, open-source buddy who sniffs the air so you don’t have to. Designed for folks who care about the air they breathe but also want a sensor with personality, HALO operates on WiFi via ESPHome, which means no creepy cloud subscriptions or hidden fees. It’s just you, HALO, and your dusty air duking it out together.
+This repository is a personal fork of the original [HALO project](https://github.com/yashmulgaonkar/halo).
+
+The upstream project supports multiple HALO hardware variants and a broader feature set. This fork focuses on one real, working TFT build and reshapes the firmware around the hardware that is actually installed:
+
+- LILYGO T-Display S3 Long
+- SCD41
+- SEN54 / SEN55-compatible ESPHome integration
+- BME280
+- WS2812 LEDs
+- no MiCS-4514 gas board
+
+The goal of this fork is not to preserve every upstream option. The goal is to keep the stock HALO look, simplify the firmware for the installed hardware, and add practical quality-of-life improvements for daily use.
 
 ---
 
-## Features? Oh, HALO’s Got a Few Good Ones:
+## What This Fork Changes
 
-- **PM (Particulate Madness):** HALO tracks dust, pollen, and those mysterious floating things in the air. From “small but annoying” (PM2.5) to “call-the-vacuum” (PM10), HALO’s on it.
-- **Sniffs Like a Dog:** HALO detects VOCs, CO₂, and gases like Ammonia, Ethanol, Methane, and Hydrogen. Basically, it’s like having a science lab shoved into a tiny box.
-- **Weather Nerd:** HALO keeps tabs on temperature, humidity, and air pressure. It’s not your local weather station — it’s cooler.
-- **Party Mode:** An eleven RGB LED HALO for air quality notifications or impromptu raves. Who said clean air can’t be fun?
-- **Bluetooth Tracker:** HALO can help automate your home or, you know, find your keys if they’re Bluetooth-enabled.
-- **Bluetooth & WiFi Powerhouse:** Includes BLE 5 + BT Mesh for seamless device integration and WiFi connectivity so HALO is always in the loop.
-- **Touch of Brilliance:** A shiny new 3.4″ 640px × 180px LCD touchscreen for easy navigation and monitoring. Control HALO like a pro without even opening an app!
+Compared with the upstream repository, this fork adds a custom TFT firmware variant with:
+
+- MiCS-4514 gas support removed from the active firmware path
+- BME280 support restored and forced to address `0x76`
+- vendored ESPHome RMT compatibility component for local reproducible builds
+- pressure display and pressure weather-trend logic
+- selectable and auto-switching history graphs
+- multi-page touch UI
+- improved WS2812 behavior for a small LED count
+- grouped Home Assistant configuration entities
+
+The full change list is documented in [CHANGES_FROM_UPSTREAM.md](CHANGES_FROM_UPSTREAM.md).
 
 ---
 
-## Hardware Components
+## Firmware Layout In This Fork
 
-HALO is built with a powerhouse of components designed to sniff out, measure, and display air quality data with style. Here’s what makes HALO tick:
+The active custom firmware lives under:
 
-### MCU (Microcontroller Unit)
-- **LILYGO T-Display-Long-S3:** The brains behind HALO, featuring an ESP32S3, a Dual-core LX7 MCU with a 3.4″ LCD touchscreen for easy interaction and a whole lot of smarts.
+- [TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/Halo-v1.yaml](TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/Halo-v1.yaml)
+- [TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/Halo-v1-Core-local.yaml](TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/Halo-v1-Core-local.yaml)
+
+Supporting local build files:
+
+- [TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/WSL-Build.md](TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/WSL-Build.md)
+- [TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/requirements-wsl.txt](TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/requirements-wsl.txt)
+- [TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/external_components/esphome_rmt_compat](TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/external_components/esphome_rmt_compat)
+
+---
+
+## Current Hardware Target
+
+### Installed in this build
+
+- LILYGO T-Display S3 Long
+- SCD41
+- SEN54
+- BME280
+- HALO MainBoard V1.1
+- HALO Breakout V1.0
+
+### Not installed in this build
+
+- MiCS-4514 / SEN0377 gas board
+
+### LED setup
+
+- WS2812
+- intended for the first `1-4` LEDs or a short external strip
+- not intended for the stock full-bright 11-LED ring behavior
+
+---
+
+## Main Firmware Features In This Fork
 
 ### Sensors
-- **SCD-41:**
-  - Measures CO₂ levels so you know when to crack a window open.
-  - Tracks temperature because no one likes surprises.
-  - Monitors humidity to keep your comfort levels in check.
-- **SEN54 (or SEN55):**
-  - Detects particulate matter: PM1, PM2.5, PM4, and PM10 (basically, HALO counts all the tiny stufflets floating around).
-  - Measures VOC (Volatile Organic Compounds) to warn you about sketchy smells.
-  - Also tracks temperature and humidity for full environmental awareness.
-- **BME280:**
-  - Keeps tabs on temperature, pressure, and humidity, because precision matters.
-- **MIC4514:**
-  - Sniffs out gases like:
-    - CO (Carbon Monoxide)
-    - C₂H₅OH (Ethanol)
-    - H₂ (Hydrogen)
-    - NO₂ (Nitrogen Dioxide)
-    - NH₃ (Ammonia)
-    - CH₄ (Methane)
-- **Neopixels (11-LED Ring):**
-  - 11x RGB LEDs to keep you visually updated on your air quality — or to add some flair to your desk.
+
+- SCD41 CO2
+- SEN54 / SEN55 particulate measurements:
+  - PM1
+  - PM2.5
+  - PM4
+  - PM10
+- SEN54 / SEN55 VOC
+- SEN54 / SEN55 temperature and humidity
+- BME280 temperature, humidity, and pressure
+
+### Display
+
+- keeps the stock HALO TFT style
+- three-page touch UI:
+  - `Overview`
+  - `Trends`
+  - `Status`
+- swipe page switching
+- touch wake
+- row-tap graph selection on overview
+- larger PM2.5 and VOC charts on trends page
+- compact graph headers with visible time windows
+
+### Graphs
+
+- selectable overview graph for:
+  - `TEMP`
+  - `CO2`
+  - `PM`
+  - `VOC`
+  - `RH`
+  - `PRESS`
+- automatic graph switching with configurable interval
+- per-metric configurable history duration
+- PM auto-selection uses the highest live PM metric at switch time
+
+### Pressure trend logic
+
+- whole-number pressure display in `hPa`
+- `6h` pressure history
+- smoothed comparison vs:
+  - `1h ago`
+  - `3h ago`
+  - `6h ago`
+- published HA entities for:
+  - `Pressure Delta 1h`
+  - `Pressure Delta 3h`
+  - `Pressure Delta 6h`
+  - `Pressure Trend`
+  - `Pressure Weather Message`
+
+### LEDs
+
+- configurable LED count with default `4`
+- startup blink disabled by default
+- manual Home Assistant light control retained
+- automatic air-quality LED mode
+- day/night LED brightness handling
+
+### Home Assistant
+
+- grouped configuration entity names:
+  - `Display: ...`
+  - `Graph: ...`
+  - `LED: ...`
+  - `Sensor: ...`
+  - `System: ...`
 
 ---
 
-## Plug & Play? More Like Plug & Pray (Kidding — It’s Easy):
+## What Was Removed Or Changed From Upstream
 
-1. **Power Up:** Plug HALO into a decent USB-C power brick. If HALO starts rebooting like it’s stuck in a bad WiFi loop, blame your cheap charger. HALO deserves better.
-2. **Find HALO’s Hotspot:** Look for the “HALO’s AP” network on your phone or computer. Connect, and voilà — HALO’s dashboard appears. If it doesn’t, just type `http://192.168.4.1`. Because nothing says “high-tech” like typing an IP address.
-3. **Join Your WiFi:** Tell HALO your WiFi name and password. Pro tip: Maybe don’t name your WiFi “NSA Surveillance Van.” HALO’s judgment-free, but still.
+### MiCS gas path removed from the custom variant
 
----
+This fork removes the MiCS-specific path from the active custom firmware:
 
-## Home Assistant Integration: Because HALO Plays Well With Others
+- MiCS sensor backend removed from the custom TFT build
+- MiCS-only Home Assistant entities removed
+- MiCS offset setting removed
+- MiCS rows removed from the main TFT UI
 
-1. Add HALO to Home Assistant using ESPHome.
-2. When prompted, click things like “Adopt” and “Submit.” It’s basically adopting a pet rock, except HALO is useful.
-3. Give HALO a home area (kitchen, bedroom, dungeon — no judgment).
+### Build setup changed
 
----
+Instead of depending on the live ESPHome PR reference for RMT, this fork vendors the required component override locally so the custom build is reproducible.
 
-## What Does HALO Measure? Everything.
+### Wrapper behavior changed
 
-- **Particulates:** PM10, PM2.5, PM4, and PM1 – tiny ones you didn’t know existed. HALO’s the Sherlock Holmes of dust.
-- **Gases:** From Nitrogen Dioxide (NO₂) to the Ammonia from your cat’s litter box, HALO’s got a nose for trouble.
-- **Humidity & Temp:** Whether you’re sweating or freezing, HALO knows.
-- **CO₂:** If your room feels stuffy, HALO will call you out.
+The upstream `Halo-v1.yaml` wrapper fetched the core package remotely.  
+This fork changes it to include the custom local core directly:
 
----
-
-## Fun Extras:
-
-- **RGB Light Show:** HALO’s RGB LED halo can flash when your air quality is trash. It’s like HALO’s saying, “Get it together, human!”
-- **Self-Calibrating Genius:** Just take HALO outside, and it’ll calibrate itself. HALO loves fresh air, too.
+- easier to diff in the fork
+- easier to build locally
+- easier to keep custom changes explicit
 
 ---
 
-## Troubleshooting? Call the HALO Hotline (AKA, Join Our Discord)
+## Build Notes
 
-If HALO misbehaves, pop into our Discord for tips, tricks, and memes. HALO doesn’t judge your air, so don’t judge HALO’s quirks.
+The recommended build path for this fork is documented in:
+
+- [TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/WSL-Build.md](TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/WSL-Build.md)
+
+Short version:
+
+1. Use a Linux-side workspace in WSL.
+2. Enter `TFT_LCD/T-Display-Long/V1/Firmware/ESPHome`.
+3. Install the pinned requirements from `requirements-wsl.txt`.
+4. Run:
+
+```bash
+esphome config Halo-v1.yaml
+esphome compile Halo-v1.yaml
+```
+
+---
+
+## Known Notes
+
+- some WS2812 setups still benefit from a proper 5V logic level shifter
+- Home Assistant may keep stale registry entries when entities were previously disabled or renamed
+- the stock Home Assistant device page is still limited by Home Assistant's own layout rules
 
 ---
 
-## Why HALO?
+## Original Project
 
-Because life’s too short for bad air and boring gadgets. HALO makes clean air monitoring fun, fabulous, and a little ridiculous.
+Original upstream repository:
 
-### Open-Source for Open Minds
-We love tinkerers, dreamers, and anyone who thinks, “You know what HALO really needs? A coffee maker attachment.” That’s why we’ve shared HALO’s software and CAD files with the world. Dive into our GitHub, unleash your inner mad scientist, and share your creations on Discord. Who knows? Your idea might just inspire HALO 2.0.
+- [yashmulgaonkar/halo](https://github.com/yashmulgaonkar/halo)
 
-- **Build Instructions:** [https://github.com/yashmulgaonkar/halo/wiki](https://github.com/yashmulgaonkar/halo/wiki)
-- **Discord:** [HALO Community](https://discord.gg/wjqgUjv8Re)
+Original upstream community/build information:
 
----
-
-<div align="center"><strong>HALO: The sensor you didn’t know you needed — but now can’t live without.</strong></div>
+- [HALO wiki](https://github.com/yashmulgaonkar/halo/wiki)
+- [HALO Discord](https://discord.gg/wjqgUjv8Re)
 
 ---
-<p align="center">
-  <a href="https://buymeacoffee.com/yashmulgaonkar" target="_blank">
-    <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 35px;">
-  </a>
-</p>
 
----
+## Why This Fork Exists
+
+This fork exists to keep one real HALO device maintained as a practical daily-use firmware build:
+
+- less unsupported hardware baggage
+- better local build reproducibility
+- more useful TFT interaction
+- more useful trend visualization
+- more practical Home Assistant integration for this exact hardware setup
