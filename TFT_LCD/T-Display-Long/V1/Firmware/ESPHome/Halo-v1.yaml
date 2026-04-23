@@ -16,7 +16,7 @@ esphome:
     version: "${version}"
 
 dashboard_import:
-  package_import_url: github://yashmulgaonkar/halo/TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/Halo-v1.yaml@main
+  package_import_url: github://AndreySemjonov/halo/TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/Halo-v1.yaml@main
   import_full_config: true
 
 ota:
@@ -32,9 +32,4 @@ wifi:
     ssid: "Halo Hotspot"
 
 packages:
-  remote_package:
-    url: https://github.com/yashmulgaonkar/halo/
-    ref: main
-    files:
-      - TFT_LCD/T-Display-Long/V1/Firmware/ESPHome/Halo-v1-Core.yaml
-    refresh: 0d
+  halo_core: !include Halo-v1-Core-local.yaml

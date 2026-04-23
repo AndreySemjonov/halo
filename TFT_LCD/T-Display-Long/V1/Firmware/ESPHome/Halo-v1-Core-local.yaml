@@ -1,0 +1,3360 @@
+#Define Project
+substitutions:
+  name: halo
+  version: "26.2.0.0"
+  led_count: "4"
+  device_description: ${name} - v${version}.
+
+psram:
+  mode: octal
+  # speed: 120MHz
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+    advanced:
+      enable_idf_experimental_features: true
+    # platform_version: 6.9.0
+    # version: 5.3.1
+
+esp32_improv:
+  authorizer: none
+
+external_components:
+  - source: github://yashmulgaonkar/esphome-components
+    components: [axs15231, sy6970]
+
+  - source:
+      type: local
+      path: ./external_components/esphome_rmt_compat
+    components: [ esp32_rmt, esp32_rmt_led_strip ]
+    refresh: 0s
+
+
+spi:
+  id: lily_spi
+  type: quad
+  clk_pin: 17
+  data_pins:
+    - 13
+    - 18
+    - 21
+    - 14
+
+captive_portal:
+
+logger:
+  level: DEBUG
+
+globals:
+  - id: cycleCounter
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: temp_unit_changed
+    type: bool
+    initial_value: "true"
+  - id: temperature_history
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(180, 0.0f)'
+  - id: co2_history
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(180, 0.0f)'
+  - id: pm1_history
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(180, 0.0f)'
+  - id: pm25_history
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(180, 0.0f)'
+  - id: pm4_history
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(180, 0.0f)'
+  - id: pm10_history
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(180, 0.0f)'
+  - id: voc_history
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(180, 0.0f)'
+  - id: humidity_history
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(180, 0.0f)'
+  - id: pressure_history
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(360, 1013.0f)'
+  - id: touch_cooldown_until_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  - id: current_page_index
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: selected_graph_metric
+    type: int
+    restore_value: no
+    initial_value: '3'
+  - id: last_graph_switch_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+switch:
+  - platform: template
+    name: "LED: Startup Blink"
+    id: startup_light_blink
+    icon: mdi:lightbulb
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    entity_category: "config"
+  - platform: template
+    name: "LED: Auto Air Quality"
+    id: auto_air_quality_leds
+    icon: mdi:brightness-auto
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    entity_category: "config"
+    turn_on_action:
+      - script.execute: update_air_quality_leds
+    turn_off_action:
+      - light.turn_off: rgb_light
+  - platform: template
+    name: "LED: Auto Night Mode"
+    id: auto_led_night_mode
+    icon: mdi:weather-night
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    entity_category: "config"
+    turn_on_action:
+      - script.execute: update_air_quality_leds
+    turn_off_action:
+      - script.execute: update_air_quality_leds
+  - platform: template
+    name: "Display: Adaptive Brightness"
+    id: adaptive_display_brightness
+    icon: mdi:brightness-percent
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    entity_category: "config"
+    turn_on_action:
+      - script.execute: update_display_brightness
+  - platform: template
+    name: "Graph: Auto Switch"
+    id: auto_graph_switching
+    icon: mdi:chart-timeline-variant
+    restore_mode: RESTORE_DEFAULT_ON
+    optimistic: true
+    entity_category: "config"
+    turn_on_action:
+      - lambda: 'id(last_graph_switch_ms) = millis();'
+    turn_off_action:
+      - lambda: 'id(last_graph_switch_ms) = millis();'
+  - platform: template
+    name: "Display: 24h Clock"
+    id: time_format
+    icon: mdi:clock-digital
+    restore_mode: RESTORE_DEFAULT_OFF
+    optimistic: true
+    entity_category: "config"
+
+select:
+  - platform: template
+    name: "Display: Temperature Unit"
+    id: display_temperature_unit
+    entity_category: "config"
+    options:
+     - "Fahrenheit"
+     - "Celsius"
+     - "Kelvin"
+    initial_option: "Fahrenheit"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - globals.set:
+          id: temp_unit_changed
+          value: "true"
+  - platform: template
+    name: "Display: Sleep Mode"
+    id: display_sleep_mode
+    entity_category: "config"
+    options:
+      - "Always On"
+      - "Auto Off"
+    initial_option: "Always On"
+    restore_value: true
+    optimistic: true
+    on_value:
+      - if:
+          condition:
+            lambda: 'return x == "Always On";'
+          then:
+            - script.execute: wake_display
+          else:
+            - script.execute: update_display_brightness
+
+interval:
+  - interval: 10s
+    then:    
+      if:
+        condition:
+          wifi.connected:
+        then:
+          - lvgl.widget.update:
+              id: wifi_stat
+              text_color: my_green
+          - lvgl.widget.show:
+              id: ym_image              
+        else:
+          - lvgl.widget.update:
+              id: wifi_stat
+              text_color: my_red
+
+  - interval: 1s
+    then:
+      - script.execute: time_update  
+
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            switch.is_on: auto_graph_switching
+          then:
+            - lambda: |-
+                const uint32_t now_ms = millis();
+                const uint32_t interval_ms = static_cast<uint32_t>(id(graph_switch_interval).state * 1000.0f);
+                if (interval_ms == 0) {
+                  id(last_graph_switch_ms) = now_ms;
+                  return;
+                }
+                if ((now_ms - id(last_graph_switch_ms)) >= interval_ms) {
+                  id(advance_auto_graph_selection).execute();
+                }
+
+  - interval: 60s
+    then:
+      - script.execute: update_display_brightness
+      - script.execute: update_air_quality_leds
+      - script.execute: update_alert_state
+      - script.execute: update_footer_summary
+      - script.execute: refresh_status_page
+
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            - binary_sensor.is_off: ink_ha_connected
+            - lambda: 'return id(cycleCounter) < 30;'
+            - switch.is_on: startup_light_blink
+
+          then:
+            - light.turn_on:
+                id: rgb_light
+                effect: "Addressable Rainbow"
+            - lambda: 'id(cycleCounter) += 1;'
+
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            - binary_sensor.is_off: ink_ha_connected
+            - lambda: 'return id(cycleCounter) > 30;'
+            - lambda: 'return id(cycleCounter) < 31;'
+            - switch.is_on: startup_light_blink
+
+          then:
+            - light.turn_off:
+                id: rgb_light
+            - lambda: 'id(cycleCounter) += 1;'              
+
+api:
+  on_client_connected:
+      - delay: 1s
+      - script.execute: update_display_brightness
+      - if:
+          condition:
+            switch.is_on: auto_air_quality_leds
+          then:
+            - script.execute: update_air_quality_leds
+          else:
+            - light.turn_off: rgb_light
+      - script.execute: update_alert_state
+      - script.execute: update_footer_summary
+      - script.execute: update_page_chrome
+      - script.execute: refresh_status_page
+      - lambda: 'id(cycleCounter) = 30;'    
+  services:
+    #Co2 Calibration Service
+    - service: calibrate_co2_value
+      variables:
+        co2_ppm: float
+      then:
+        - scd4x.perform_forced_calibration:
+            value: !lambda "return co2_ppm;"
+            id: scd40
+    - service: sen55_clean
+      then:
+        - sen5x.start_fan_autoclean: sen55    
+
+i2c:
+  - sda: 9
+    scl: 48
+    id: lily_i2c
+  - sda: 15
+    scl: 10
+    id: touch_i2c
+
+output:
+  - platform: ledc
+    pin: 1
+    id: backlight
+    frequency: 100Hz  #Datasheet suggests low-frequency PWM. Should prevent stability issues.
+    
+# sy6970:
+#   i2c_id: touch_i2c
+#   state_led_enable: false  # To turn off the blinking green status LED
+
+display:
+  - platform: qspi_dbi
+    id: lily_display
+    model: AXS15231
+    spi_id: lily_spi
+    dimensions:
+      height: 640
+      width: 180
+    cs_pin: 12
+    reset_pin: 16
+    rotation: 0
+    auto_clear_enabled: false
+
+touchscreen:
+  - platform: axs15231
+    id: lily_touch
+    display: lily_display
+    i2c_id: touch_i2c
+    interrupt_pin: GPIO11
+    transform:
+      mirror_x: false
+      mirror_y: false
+      swap_xy: false
+    on_touch:
+      - lambda: |-
+            const uint32_t now_ms = millis();
+            if (now_ms < id(touch_cooldown_until_ms)) {
+              return;
+            }
+
+            if (!id(display_backlight).remote_values.is_on()) {
+              id(touch_cooldown_until_ms) = now_ms + 300;
+              id(wake_display).execute();
+              return;
+            }
+
+            id(wake_display).execute();
+
+            if (touch.x <= 92 && touch.y <= 36) {
+              id(touch_cooldown_until_ms) = now_ms + 300;
+              id(time_format).toggle();
+              id(refresh_status_page).execute();
+              return;
+            }
+
+            if (id(current_page_index) == 0 && touch.y >= 38 && touch.y <= 86) {
+              id(touch_cooldown_until_ms) = now_ms + 300;
+              id(toggle_auto_led_mode).execute();
+              return;
+            }
+
+            if (id(current_page_index) == 0 && touch.x >= 5 && touch.x <= 175 && touch.y >= 87 && touch.y <= 434) {
+              int selected_metric = 3;
+              if (touch.y <= 106) {
+                selected_metric = 0;
+              } else if (touch.y <= 147) {
+                selected_metric = 1;
+              } else if (touch.y <= 188) {
+                selected_metric = 2;
+              } else if (touch.y <= 229) {
+                selected_metric = 3;
+              } else if (touch.y <= 270) {
+                selected_metric = 4;
+              } else if (touch.y <= 311) {
+                selected_metric = 5;
+              } else if (touch.y <= 352) {
+                selected_metric = 6;
+              } else if (touch.y <= 393) {
+                selected_metric = 7;
+              } else {
+                selected_metric = 8;
+              }
+
+              id(selected_graph_metric) = selected_metric;
+              id(last_graph_switch_ms) = now_ms;
+              id(touch_cooldown_until_ms) = now_ms + 250;
+              id(redraw_graphs).execute();
+              return;
+            }
+
+            if (id(current_page_index) == 0 && touch.x >= 5 && touch.x <= 175 && touch.y >= 575) {
+              id(touch_cooldown_until_ms) = now_ms + 300;
+              if (id(adaptive_display_brightness).state) {
+                id(adaptive_display_brightness).turn_off();
+                auto call = id(display_backlight).turn_on();
+                call.set_transition_length(0);
+                call.set_brightness(1.0f);
+                call.perform();
+              } else {
+                id(adaptive_display_brightness).turn_on();
+                id(update_display_brightness).execute();
+              }
+              id(refresh_status_page).execute();
+              return;
+            }
+
+    on_update:
+      - lambda: |-
+            const uint32_t now_ms = millis();
+            if (now_ms < id(touch_cooldown_until_ms)) {
+              return;
+            }
+
+            for (const auto &touch : touches) {
+              const int dx = touch.x - touch.x_org;
+              const int dy = touch.y - touch.y_org;
+              if ((dx <= -55 || dx >= 55) && dy > -70 && dy < 70) {
+                id(touch_cooldown_until_ms) = now_ms + 550;
+                if (dx < 0) {
+                  id(show_next_page).execute();
+                } else {
+                  id(show_previous_page).execute();
+                }
+                return;
+              }
+            }
+
+web_server:
+  port: 80
+
+image:
+  - file: https://yashmulgaonkar.github.io/assets/YM.png
+    id: ym_logo
+    resize: 25x25
+    type: RGB565
+    transparency: alpha_channel
+
+color:
+  - id: my_red
+    red: 100%
+    green: 0%
+    blue: 0%
+  - id: my_yellow
+    red: 100%
+    green: 100%
+    blue: 0%
+  - id: my_green
+    red: 0%
+    green: 100%
+    blue: 0%
+  - id: my_blue
+    red: 0%
+    green: 0%
+    blue: 100%
+  - id: my_gray
+    red: 50%
+    green: 50%
+    blue: 50%
+  - id: my_label
+    red: 72%
+    green: 78%
+    blue: 82%
+  - id: my_unit
+    red: 58%
+    green: 64%
+    blue: 68%
+  - id: my_divider
+    red: 12%
+    green: 34%
+    blue: 39%
+  - id: my_footer_panel
+    red: 5%
+    green: 9%
+    blue: 11%
+  - id: my_orange
+    red: 100%
+    green: 50%
+    blue: 0%
+  - id: my_teal
+    red: 0%
+    green: 100%
+    blue: 100%
+  - id: my_white
+    red: 100%
+    green: 100%
+    blue: 100%
+  - id: my_black
+    red: 0%
+    green: 0%
+    blue: 0%
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      - script.execute: time_update
+      - script.execute: update_display_brightness
+      - script.execute: update_air_quality_leds
+
+script:
+  - id: time_update
+    then:
+      - lvgl.label.update:
+          id: timeVal
+          text: !lambda |-
+            static char time_buf[17];
+            auto now = id(ha_time).now();
+            bool is_pm = now.hour >= 12;
+            int hour_12 = now.hour % 12;
+            if (hour_12 == 0) {
+              hour_12 = 12; // 12 AM/PM should be displayed as 12, not 0
+            }
+            if(id(time_format).state) {
+              snprintf(time_buf, sizeof(time_buf), "%02d:%02d", now.hour, now.minute);
+            }
+            else {
+              snprintf(time_buf, sizeof(time_buf), "%2d:%02d%s", hour_12, now.minute, is_pm ? "PM" : "AM");
+            }
+            return time_buf;
+  - id: wake_display
+    mode: restart
+    then:
+      - lambda: |-
+          float brightness = id(display_day_brightness).state / 100.0f;
+          auto now = id(ha_time).now();
+          if (id(adaptive_display_brightness).state && now.is_valid()) {
+            const int start_hour = static_cast<int>(id(night_mode_start_hour).state);
+            const int end_hour = static_cast<int>(id(night_mode_end_hour).state);
+            bool is_night = false;
+            if (start_hour == end_hour) {
+              is_night = true;
+            } else if (start_hour < end_hour) {
+              is_night = now.hour >= start_hour && now.hour < end_hour;
+            } else {
+              is_night = now.hour >= start_hour || now.hour < end_hour;
+            }
+
+            if (is_night) {
+              brightness = id(display_night_brightness).state / 100.0f;
+            }
+          }
+
+          auto call = id(display_backlight).turn_on();
+          call.set_transition_length(150);
+          call.set_brightness(brightness);
+          call.perform();
+  - id: update_page_chrome
+    mode: restart
+    then:
+      - lambda: |-
+          const int page = id(current_page_index);
+          std::string title = "OVERVIEW";
+          std::string dots = "● ○ ○";
+          if (page == 1) {
+            title = "TRENDS";
+            dots = "○ ● ○";
+          } else if (page == 2) {
+            title = "STATUS";
+            dots = "○ ○ ●";
+          }
+          const lv_color_t active = lv_color_hex(0x76FA76);
+          const lv_color_t inactive = lv_color_hex(0x35525A);
+          lv_obj_set_style_bg_color(id(page_dot_1), page == 0 ? active : inactive, LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(page_dot_2), page == 1 ? active : inactive, LV_PART_MAIN);
+          lv_obj_set_style_bg_color(id(page_dot_3), page == 2 ? active : inactive, LV_PART_MAIN);
+  - id: toggle_auto_led_mode
+    mode: restart
+    then:
+      - if:
+          condition:
+            switch.is_on: auto_air_quality_leds
+          then:
+            - switch.turn_off: auto_air_quality_leds
+            - light.turn_off: rgb_light
+          else:
+            - switch.turn_on: auto_air_quality_leds
+            - script.execute: update_air_quality_leds
+      - script.execute: refresh_status_page
+  - id: advance_auto_graph_selection
+    mode: restart
+    then:
+      - lambda: |-
+          auto pm_metric_for_cycle = [&]() -> int {
+            struct Candidate {
+              int metric;
+              float value;
+            };
+
+            Candidate candidates[] = {
+              {2, id(pm_1_0).has_state() ? id(pm_1_0).state : -1.0f},
+              {3, id(pm_2_5).has_state() ? id(pm_2_5).state : -1.0f},
+              {4, id(pm_4_0).has_state() ? id(pm_4_0).state : -1.0f},
+              {5, id(pm_10_0).has_state() ? id(pm_10_0).state : -1.0f},
+            };
+
+            int best_metric = 3;
+            float best_value = candidates[1].value;
+            for (const auto &candidate : candidates) {
+              if (candidate.value > best_value) {
+                best_metric = candidate.metric;
+                best_value = candidate.value;
+              }
+            }
+            return best_metric;
+          };
+
+          auto group_for_metric = [](int metric) -> int {
+            if (metric == 0) return 0;
+            if (metric == 1) return 1;
+            if (metric >= 2 && metric <= 5) return 2;
+            if (metric == 6) return 3;
+            if (metric == 7) return 4;
+            return 5;
+          };
+
+          const int next_group = (group_for_metric(id(selected_graph_metric)) + 1) % 6;
+          int next_metric = 3;
+          switch (next_group) {
+            case 0:
+              next_metric = 0;
+              break;
+            case 1:
+              next_metric = 1;
+              break;
+            case 2:
+              next_metric = pm_metric_for_cycle();
+              break;
+            case 3:
+              next_metric = 6;
+              break;
+            case 4:
+              next_metric = 7;
+              break;
+            default:
+              next_metric = 8;
+              break;
+          }
+
+          id(selected_graph_metric) = next_metric;
+          id(last_graph_switch_ms) = millis();
+      - script.execute: redraw_graphs
+  - id: show_overview_page
+    mode: restart
+    then:
+      - lvgl.page.show:
+          id: main_page
+          animation: MOVE_RIGHT
+          time: 220ms
+      - lambda: 'id(current_page_index) = 0;'
+      - script.execute: update_page_chrome
+  - id: show_trends_page
+    mode: restart
+    then:
+      - lvgl.page.show:
+          id: trends_page
+          animation: MOVE_LEFT
+          time: 220ms
+      - lambda: 'id(current_page_index) = 1;'
+      - script.execute: update_page_chrome
+      - script.execute: refresh_status_page
+      - script.execute: redraw_graphs
+  - id: show_status_page
+    mode: restart
+    then:
+      - lvgl.page.show:
+          id: status_page
+          animation: MOVE_LEFT
+          time: 220ms
+      - lambda: 'id(current_page_index) = 2;'
+      - script.execute: update_page_chrome
+      - script.execute: refresh_status_page
+  - id: show_next_page
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return id(current_page_index) == 0;'
+          then:
+            - script.execute: show_trends_page
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(current_page_index) == 1;'
+                then:
+                  - script.execute: show_status_page
+                else:
+                  - script.execute: show_overview_page
+  - id: show_previous_page
+    mode: restart
+    then:
+      - if:
+          condition:
+            lambda: 'return id(current_page_index) == 0;'
+          then:
+            - lvgl.page.show:
+                id: status_page
+                animation: MOVE_RIGHT
+                time: 220ms
+            - lambda: 'id(current_page_index) = 2;'
+            - script.execute: update_page_chrome
+            - script.execute: refresh_status_page
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(current_page_index) == 1;'
+                then:
+                  - lvgl.page.show:
+                      id: main_page
+                      animation: MOVE_RIGHT
+                      time: 220ms
+                  - lambda: 'id(current_page_index) = 0;'
+                  - script.execute: update_page_chrome
+                else:
+                  - lvgl.page.show:
+                      id: trends_page
+                      animation: MOVE_RIGHT
+                      time: 220ms
+                  - lambda: 'id(current_page_index) = 1;'
+                  - script.execute: update_page_chrome
+                  - script.execute: refresh_status_page
+                  - script.execute: redraw_graphs
+  - id: update_display_brightness
+    mode: restart
+    then:
+      - lambda: |-
+          if (!id(adaptive_display_brightness).state) {
+            return;
+          }
+
+          if (!id(display_backlight).remote_values.is_on()) {
+            return;
+          }
+
+          float brightness = id(display_day_brightness).state / 100.0f;
+          auto now = id(ha_time).now();
+          if (now.is_valid()) {
+            const int start_hour = static_cast<int>(id(night_mode_start_hour).state);
+            const int end_hour = static_cast<int>(id(night_mode_end_hour).state);
+            bool is_night = false;
+            if (start_hour == end_hour) {
+              is_night = true;
+            } else if (start_hour < end_hour) {
+              is_night = now.hour >= start_hour && now.hour < end_hour;
+            } else {
+              is_night = now.hour >= start_hour || now.hour < end_hour;
+            }
+
+            if (is_night) {
+              brightness = id(display_night_brightness).state / 100.0f;
+            }
+          }
+
+          auto call = id(display_backlight).turn_on();
+          call.set_transition_length(0);
+          call.set_brightness(brightness);
+          call.perform();
+  - id: update_air_quality_leds
+    mode: restart
+    then:
+      - lambda: |-
+          if (!id(auto_air_quality_leds).state) {
+            return;
+          }
+
+          if (!id(computed_halo_aqi).has_state()) {
+            auto off_call = id(rgb_light).turn_off();
+            off_call.perform();
+            return;
+          }
+
+          const float aqi = id(computed_halo_aqi).state;
+          float brightness = std::max(0.40f, id(auto_led_brightness).state / 100.0f);
+          auto now = id(ha_time).now();
+          if (id(auto_led_night_mode).state && now.is_valid()) {
+            const int start_hour = static_cast<int>(id(night_mode_start_hour).state);
+            const int end_hour = static_cast<int>(id(night_mode_end_hour).state);
+            bool is_night = false;
+            if (start_hour == end_hour) {
+              is_night = true;
+            } else if (start_hour < end_hour) {
+              is_night = now.hour >= start_hour && now.hour < end_hour;
+            } else {
+              is_night = now.hour >= start_hour || now.hour < end_hour;
+            }
+
+            if (is_night) {
+              brightness = id(night_auto_led_brightness).state / 100.0f;
+            }
+          }
+
+          int aqi_level = 0;
+          if (aqi <= 50.0f) {
+            aqi_level = 0;
+          } else if (aqi <= 100.0f) {
+            aqi_level = 1;
+          } else if (aqi <= 150.0f) {
+            aqi_level = 2;
+          } else if (aqi <= 200.0f) {
+            aqi_level = 3;
+          } else if (aqi <= 300.0f) {
+            aqi_level = 4;
+          } else {
+            aqi_level = 5;
+          }
+
+          int voc_floor = 0;
+          if (id(sen55_voc).has_state()) {
+            const float voc = id(sen55_voc).state;
+            if (voc >= 400.0f) {
+              voc_floor = 3;
+            } else if (voc >= 250.0f) {
+              voc_floor = 2;
+            } else if (voc >= 150.0f) {
+              voc_floor = 1;
+            }
+          }
+
+          const int effective_level = std::max(aqi_level, voc_floor);
+          float red = 0.0f;
+          float green = 0.0f;
+          float blue = 0.0f;
+
+          if (effective_level == 0) {
+            red = 118.0f / 255.0f;
+            green = 250.0f / 255.0f;
+            blue = 118.0f / 255.0f;
+          } else if (effective_level == 1) {
+            red = 1.0f;
+            green = 1.0f;
+            blue = 0.0f;
+          } else if (effective_level == 2) {
+            red = 1.0f;
+            green = 165.0f / 255.0f;
+            blue = 0.0f;
+          } else if (effective_level == 3) {
+            red = 1.0f;
+            green = 0.0f;
+            blue = 0.0f;
+          } else if (effective_level == 4) {
+            red = 128.0f / 255.0f;
+            green = 0.0f;
+            blue = 128.0f / 255.0f;
+          } else {
+            red = 128.0f / 255.0f;
+            green = 0.0f;
+            blue = 0.0f;
+          }
+
+          auto call = id(rgb_light).turn_on();
+          call.set_transition_length(0);
+          call.set_effect("None");
+          call.set_brightness(brightness);
+          call.set_red(red);
+          call.set_green(green);
+          call.set_blue(blue);
+          call.perform();
+  - id: update_pressure_trend
+    mode: restart
+    then:
+      - lambda: |-
+          const auto &hist = id(pressure_history);
+          const size_t smooth_window = 15;
+
+          auto average_window = [&](size_t offset_minutes, size_t window_minutes, bool &ok) -> float {
+            ok = false;
+            if (hist.empty()) {
+              return 0.0f;
+            }
+            if (hist.size() <= offset_minutes) {
+              return 0.0f;
+            }
+
+            const int end_index = static_cast<int>(hist.size()) - 1 - static_cast<int>(offset_minutes);
+            const int start_index = std::max(0, end_index - static_cast<int>(window_minutes) + 1);
+            if (end_index < start_index) {
+              return 0.0f;
+            }
+
+            float sum = 0.0f;
+            int count = 0;
+            for (int i = start_index; i <= end_index; i++) {
+              const float value = hist[i];
+              if (value > 0.0f) {
+                sum += value;
+                count++;
+              }
+            }
+
+            if (count == 0) {
+              return 0.0f;
+            }
+
+            ok = true;
+            return sum / static_cast<float>(count);
+          };
+
+          bool has_now = false;
+          const float smooth_now = average_window(0, smooth_window, has_now);
+
+          bool has_1h = false;
+          bool has_3h = false;
+          bool has_6h = false;
+          const float smooth_1h = average_window(60, smooth_window, has_1h);
+          const float smooth_3h = average_window(180, smooth_window, has_3h);
+          const float smooth_6h = average_window(360, smooth_window, has_6h);
+
+          float delta_1h = NAN;
+          float delta_3h = NAN;
+          float delta_6h = NAN;
+          if (has_now && has_1h) delta_1h = smooth_now - smooth_1h;
+          if (has_now && has_3h) delta_3h = smooth_now - smooth_3h;
+          if (has_now && has_6h) delta_6h = smooth_now - smooth_6h;
+
+          id(pressure_delta_1h).publish_state(delta_1h);
+          id(pressure_delta_3h).publish_state(delta_3h);
+          id(pressure_delta_6h).publish_state(delta_6h);
+
+          std::string trend_text = "Gathering Data";
+          std::string short_text = "WAIT";
+          std::string message_text = "Collecting pressure history for trend analysis";
+          lv_color_t trend_color = lv_color_hex(0x8DD8FF);
+
+          const bool storm_risk =
+              (has_1h && delta_1h <= -2.0f) ||
+              (has_3h && delta_3h <= -4.0f) ||
+              (has_6h && delta_6h <= -6.0f);
+
+          const bool rapid_drop =
+              (has_1h && delta_1h <= -1.5f) ||
+              (has_3h && delta_3h <= -3.0f) ||
+              (has_6h && delta_6h <= -5.0f);
+
+          const bool improving =
+              (has_1h && delta_1h >= 1.5f) ||
+              (has_3h && delta_3h >= 3.0f) ||
+              (has_6h && delta_6h >= 5.0f);
+
+          const bool stable =
+              has_3h && has_6h &&
+              std::abs(delta_3h) < 1.0f &&
+              std::abs(delta_6h) < 2.0f;
+
+          if (storm_risk) {
+            trend_text = "Storm Risk";
+            short_text = "STORM";
+            message_text = "Pressure dropping very fast - unsettled or windy weather possible";
+            trend_color = lv_color_hex(0xFF4D4D);
+          } else if (rapid_drop) {
+            trend_text = "Rapid Drop";
+            short_text = "DROP";
+            message_text = "Pressure falling quickly - weather may worsen soon";
+            trend_color = lv_color_hex(0xFFA500);
+          } else if (improving) {
+            trend_text = "Improving";
+            short_text = "RISE";
+            message_text = "Pressure rising - weather may improve";
+            trend_color = lv_color_hex(0x76FA76);
+          } else if (stable) {
+            trend_text = "Stable";
+            short_text = "STDY";
+            message_text = "Pressure stable - weather pattern likely steady";
+            trend_color = lv_color_hex(0xC0C0C0);
+          } else if (has_1h || has_3h || has_6h) {
+            trend_text = "Minor Drift";
+            short_text = "DRIFT";
+            message_text = "Pressure drifting - no strong weather signal";
+            trend_color = lv_color_hex(0x8DD8FF);
+          }
+
+          id(pressure_trend_state).publish_state(trend_text);
+          id(pressure_weather_message).publish_state(message_text);
+          lv_label_set_text(id(pressure_trend_label), short_text.c_str());
+          lv_obj_set_style_text_color(id(pressure_trend_label), trend_color, LV_PART_MAIN);
+          lv_label_set_text(id(trends_pressure_value), trend_text.c_str());
+          lv_obj_set_style_text_color(id(trends_pressure_value), trend_color, LV_PART_MAIN);
+      - script.execute: refresh_status_page
+  - id: update_alert_state
+    mode: restart
+    then:
+      - lambda: |-
+          auto delta_for = [](const std::vector<float> &hist, size_t lookback) -> float {
+            if (hist.size() <= lookback) {
+              return 0.0f;
+            }
+            const float older = hist[hist.size() - 1 - lookback];
+            const float current = hist.back();
+            if (older <= 0.0f) {
+              return 0.0f;
+            }
+            return current - older;
+          };
+
+          const float aqi = id(computed_halo_aqi).has_state() ? id(computed_halo_aqi).state : 0.0f;
+          const float voc = id(sen55_voc).has_state() ? id(sen55_voc).state : 0.0f;
+          const float co2_value = id(co2).has_state() ? id(co2).state : 0.0f;
+          const float pm_delta = delta_for(id(pm25_history), 5);
+          const float voc_delta = delta_for(id(voc_history), 5);
+
+          const bool severe_air = aqi > 150.0f || voc > 250.0f || co2_value > 1500.0f;
+          const bool watch_air = aqi > 100.0f || voc > 150.0f || co2_value > 1000.0f;
+          const bool rising_fast = pm_delta > 5.0f || voc_delta > 40.0f;
+
+          std::string alert_state = "Stable";
+          std::string badge_text = "";
+          lv_color_t badge_color = lv_color_hex(0xFFFFFF);
+          int border_width = 0;
+
+          if (severe_air) {
+            alert_state = "Alert";
+            badge_text = "ALERT";
+            badge_color = lv_color_hex(0xFF4D4D);
+            border_width = 2;
+          } else if (watch_air) {
+            alert_state = "Watch";
+            badge_text = "WATCH";
+            badge_color = lv_color_hex(0xFFA500);
+            border_width = 2;
+          } else if (rising_fast) {
+            alert_state = "Rising";
+            badge_text = "RISE";
+            badge_color = lv_color_hex(0xFFFF66);
+            border_width = 2;
+          }
+
+          id(air_alert_state).publish_state(alert_state);
+          lv_label_set_text(id(aqi_alert_label), badge_text.c_str());
+          lv_obj_set_style_text_color(id(aqi_alert_label), badge_color, LV_PART_MAIN);
+          lv_obj_set_style_border_width(id(aqi_widget), border_width, LV_PART_MAIN);
+          lv_obj_set_style_border_color(id(aqi_widget), badge_color, LV_PART_MAIN);
+          lv_obj_set_style_border_opa(id(aqi_widget), border_width > 0 ? LV_OPA_COVER : LV_OPA_TRANSP, LV_PART_MAIN);
+      - script.execute: refresh_status_page
+  - id: update_footer_summary
+    mode: restart
+    then:
+      - lambda: |-
+          auto delta_for = [](const std::vector<float> &hist, size_t lookback) -> float {
+            if (hist.size() <= lookback) {
+              return 0.0f;
+            }
+            const float older = hist[hist.size() - 1 - lookback];
+            const float current = hist.back();
+            if (older <= 0.0f) {
+              return 0.0f;
+            }
+            return current - older;
+          };
+
+          const float aqi = id(computed_halo_aqi).has_state() ? id(computed_halo_aqi).state : 0.0f;
+          const float voc = id(sen55_voc).has_state() ? id(sen55_voc).state : 0.0f;
+          const float co2_value = id(co2).has_state() ? id(co2).state : 0.0f;
+          const float temp_value = id(sen55_temperature).has_state() ? id(sen55_temperature).state : 0.0f;
+          const float humidity_value = id(sen55_humidity).has_state() ? id(sen55_humidity).state : 0.0f;
+          const float pm_delta = delta_for(id(pm25_history), 5);
+          const float voc_delta = delta_for(id(voc_history), 5);
+
+          std::string primary_summary = "Air quality steady";
+          std::string secondary_summary = "Comfort OK | P steady";
+          lv_color_t primary_color = lv_color_hex(0xFFFFFF);
+          lv_color_t secondary_color = lv_color_hex(0xA0A0A0);
+          lv_color_t panel_border = lv_color_hex(0x1F565F);
+
+          if (aqi > 150.0f || voc > 250.0f || co2_value > 1500.0f) {
+            primary_summary = "Ventilate room now";
+            primary_color = lv_color_hex(0xFF5A5A);
+            panel_border = primary_color;
+          } else if (co2_value > 1000.0f) {
+            primary_summary = "Open a window soon";
+            primary_color = lv_color_hex(0xFFD966);
+            panel_border = primary_color;
+          } else if (pm_delta > 5.0f || voc_delta > 40.0f) {
+            primary_summary = "Air worsening";
+            primary_color = lv_color_hex(0xFFD966);
+            panel_border = primary_color;
+          } else if (pm_delta < -3.0f && voc_delta < -20.0f && aqi <= 100.0f && voc <= 150.0f) {
+            primary_summary = "Air improving";
+            primary_color = lv_color_hex(0x76FA76);
+            panel_border = primary_color;
+          } else if (humidity_value < 30.0f) {
+            primary_summary = "Air is too dry";
+            primary_color = lv_color_hex(0x76FA76);
+            panel_border = primary_color;
+          } else if (humidity_value > 60.0f) {
+            primary_summary = "Air is too humid";
+            primary_color = lv_color_hex(0xFFD966);
+            panel_border = primary_color;
+          } else if (temp_value > 27.0f) {
+            primary_summary = "Room feels warm";
+            primary_color = lv_color_hex(0xFFA500);
+            panel_border = primary_color;
+          } else if (temp_value < 18.0f) {
+            primary_summary = "Room feels cool";
+            primary_color = lv_color_hex(0x76FA76);
+            panel_border = primary_color;
+          }
+
+          std::string comfort_text = "Comfort OK";
+          if (humidity_value < 30.0f) {
+            comfort_text = "Dry air";
+          } else if (humidity_value > 60.0f) {
+            comfort_text = "Humid air";
+          } else if (temp_value > 27.0f) {
+            comfort_text = "Warm room";
+          } else if (temp_value < 18.0f) {
+            comfort_text = "Cool room";
+          }
+
+          std::string pressure_text = "P learning";
+          if (id(pressure_trend_state).state == "Stable") {
+            pressure_text = "P steady";
+          } else if (id(pressure_trend_state).state == "Improving") {
+            pressure_text = "P improving";
+          } else if (id(pressure_trend_state).state == "Rapid Drop") {
+            pressure_text = "P dropping";
+          } else if (id(pressure_trend_state).state == "Storm Risk") {
+            pressure_text = "P storm risk";
+          } else if (id(pressure_trend_state).state == "Minor Drift") {
+            pressure_text = "P drifting";
+          }
+
+          secondary_summary = comfort_text + " | " + pressure_text;
+
+          id(air_summary_text).publish_state(primary_summary);
+          id(comfort_summary_text).publish_state(secondary_summary);
+          lv_label_set_text(id(footer_primary_label), primary_summary.c_str());
+          lv_obj_set_style_text_color(id(footer_primary_label), primary_color, LV_PART_MAIN);
+          lv_label_set_text(id(footer_secondary_label), secondary_summary.c_str());
+          lv_obj_set_style_text_color(id(footer_secondary_label), secondary_color, LV_PART_MAIN);
+          lv_obj_set_style_border_color(id(footer_panel), panel_border, LV_PART_MAIN);
+          lv_label_set_text(id(trends_summary_primary), primary_summary.c_str());
+          lv_obj_set_style_text_color(id(trends_summary_primary), primary_color, LV_PART_MAIN);
+          lv_label_set_text(id(trends_summary_secondary), secondary_summary.c_str());
+          lv_obj_set_style_text_color(id(trends_summary_secondary), secondary_color, LV_PART_MAIN);
+      - script.execute: refresh_status_page
+  - id: refresh_status_page
+    mode: restart
+    then:
+      - lambda: |-
+          const bool api_online = id(ink_ha_connected).state;
+          const float rssi = id(wifi_signal_db).has_state() ? id(wifi_signal_db).state : 0.0f;
+          const uint32_t uptime_seconds = id(sys_uptime).has_state() ? static_cast<uint32_t>(id(sys_uptime).state) : 0;
+          const uint32_t days = uptime_seconds / 86400U;
+          const uint32_t hours = (uptime_seconds % 86400U) / 3600U;
+          const uint32_t minutes = (uptime_seconds % 3600U) / 60U;
+
+          char rssi_buf[20];
+          snprintf(rssi_buf, sizeof(rssi_buf), "%.0f dBm", rssi);
+          lv_label_set_text(id(status_wifi_value), rssi_buf);
+
+          char uptime_buf[24];
+          if (days > 0) {
+            snprintf(uptime_buf, sizeof(uptime_buf), "%ud %02uh", days, hours);
+          } else {
+            snprintf(uptime_buf, sizeof(uptime_buf), "%uh %02um", hours, minutes);
+          }
+          lv_label_set_text(id(status_uptime_value), uptime_buf);
+          lv_label_set_text(id(status_api_value), api_online ? "Connected" : "Waiting");
+          lv_label_set_text(id(status_alert_value), id(air_alert_state).state.c_str());
+          lv_label_set_text(id(status_voc_quality_value), id(voc_quality).state.c_str());
+          lv_label_set_text(id(status_pressure_value), id(pressure_trend_state).state.c_str());
+          lv_label_set_text(id(status_led_mode_value), id(auto_air_quality_leds).state ? "Auto" : "Manual");
+          lv_label_set_text(id(status_display_mode_value), id(adaptive_display_brightness).state ? "Adaptive" : "Fixed");
+  - id: redraw_graphs
+    mode: restart
+    then:
+      - lambda: |-
+          auto draw_graph = [](lv_obj_t *canvas, const std::vector<float> &hist, float baseline, lv_color_t color) {
+            const int width = lv_obj_get_width(canvas);
+            const int height = lv_obj_get_height(canvas);
+            const int left_pad = 2;
+            const int right_pad = 2;
+            const int top_pad = 6;
+            const int bottom_pad = 8;
+            const int usable_w = std::max(1, width - left_pad - right_pad - 1);
+            const int usable_h = std::max(1, height - top_pad - bottom_pad);
+
+            lv_canvas_fill_bg(canvas, lv_color_hex(0x000000), LV_OPA_COVER);
+
+            lv_draw_line_dsc_t guide_dsc;
+            lv_draw_line_dsc_init(&guide_dsc);
+            guide_dsc.color = lv_color_hex(0x16343A);
+            guide_dsc.width = 1;
+            for (int guide = 1; guide <= 3; guide++) {
+              const int y = top_pad + ((usable_h * guide) / 4);
+              lv_point_t guide_pts[2];
+              guide_pts[0].x = left_pad;
+              guide_pts[0].y = y;
+              guide_pts[1].x = width - right_pad;
+              guide_pts[1].y = y;
+              lv_canvas_draw_line(canvas, guide_pts, 2, &guide_dsc);
+            }
+
+            bool has_samples = false;
+            float min_v = 0.0f;
+            float max_v = baseline;
+            for (float value : hist) {
+              if (value > 0.0f) {
+                if (!has_samples) {
+                  min_v = value;
+                  max_v = value;
+                  has_samples = true;
+                } else {
+                  min_v = std::min(min_v, value);
+                  max_v = std::max(max_v, value);
+                }
+              }
+            }
+
+            if (!has_samples) {
+              min_v = 0.0f;
+              max_v = baseline;
+            }
+
+            float range = max_v - min_v;
+            const float min_range = std::max(1.0f, baseline * 0.12f);
+            if (range < min_range) {
+              const float mid = (max_v + min_v) * 0.5f;
+              min_v = std::max(0.0f, mid - (min_range * 0.5f));
+              max_v = mid + (min_range * 0.5f);
+            }
+
+            range = std::max(1.0f, max_v - min_v);
+            const float padding = range * 0.15f;
+            min_v = std::max(0.0f, min_v - padding);
+            max_v += padding;
+            range = std::max(1.0f, max_v - min_v);
+
+            auto point_y = [&](float value) -> int {
+              if (value <= 0.0f) {
+                value = min_v;
+              }
+              int y = top_pad + usable_h - static_cast<int>(((value - min_v) / range) * usable_h);
+              if (y < top_pad) y = top_pad;
+              if (y > top_pad + usable_h) y = top_pad + usable_h;
+              return y;
+            };
+
+            lv_draw_line_dsc_t fill_dsc;
+            lv_draw_line_dsc_init(&fill_dsc);
+            fill_dsc.color = color;
+            fill_dsc.width = 1;
+            fill_dsc.opa = LV_OPA_20;
+
+            lv_draw_line_dsc_t line_dsc;
+            lv_draw_line_dsc_init(&line_dsc);
+            line_dsc.color = color;
+            line_dsc.width = 3;
+            line_dsc.round_start = 1;
+            line_dsc.round_end = 1;
+
+            lv_point_t pts[2];
+            const int point_count = hist.size();
+            for (int i = 0; i < point_count - 1; i++) {
+              const int x1 = left_pad + (i * usable_w) / (point_count - 1);
+              const int x2 = left_pad + ((i + 1) * usable_w) / (point_count - 1);
+              const int y1 = point_y(hist[i]);
+              const int y2 = point_y(hist[i + 1]);
+
+              lv_point_t fill_pts[2];
+              fill_pts[0].x = x2;
+              fill_pts[0].y = y2;
+              fill_pts[1].x = x2;
+              fill_pts[1].y = top_pad + usable_h + 1;
+              lv_canvas_draw_line(canvas, fill_pts, 2, &fill_dsc);
+
+              pts[0].x = x1;
+              pts[0].y = y1;
+              pts[1].x = x2;
+              pts[1].y = y2;
+              lv_canvas_draw_line(canvas, pts, 2, &line_dsc);
+            }
+
+            const float last_value = hist.empty() ? min_v : hist.back();
+            const int last_y = point_y(last_value);
+            const int last_x = left_pad + usable_w;
+
+            lv_draw_rect_dsc_t point_dsc;
+            lv_draw_rect_dsc_init(&point_dsc);
+            point_dsc.bg_color = color;
+            point_dsc.bg_opa = LV_OPA_COVER;
+            point_dsc.border_opa = LV_OPA_COVER;
+            point_dsc.border_color = lv_color_hex(0x000000);
+            point_dsc.border_width = 2;
+            point_dsc.radius = LV_RADIUS_CIRCLE;
+            lv_canvas_draw_rect(canvas, last_x - 4, last_y - 4, 8, 8, &point_dsc);
+          };
+
+          auto delta_for = [](const std::vector<float> &hist, size_t lookback) -> float {
+            if (hist.size() <= lookback) {
+              return 0.0f;
+            }
+            const float older = hist[hist.size() - 1 - lookback];
+            const float current = hist.back();
+            if (older <= 0.0f) {
+              return 0.0f;
+            }
+            return current - older;
+          };
+          auto window_for_minutes = [](const std::vector<float> &hist, float minutes, float points_per_minute) -> std::vector<float> {
+            const int requested_points = std::max(6, std::min(static_cast<int>(hist.size()), static_cast<int>(minutes * points_per_minute)));
+            if (requested_points >= static_cast<int>(hist.size())) {
+              return hist;
+            }
+            return std::vector<float>(hist.end() - requested_points, hist.end());
+          };
+
+          auto minutes_for_metric = [&](int metric) -> float {
+            switch (metric) {
+              case 0: return id(temperature_graph_minutes).state;
+              case 1: return id(co2_graph_minutes).state;
+              case 2: return id(pm1_graph_minutes).state;
+              case 3: return id(pm25_graph_minutes).state;
+              case 4: return id(pm4_graph_minutes).state;
+              case 5: return id(pm10_graph_minutes).state;
+              case 6: return id(voc_graph_minutes).state;
+              case 7: return id(humidity_graph_minutes).state;
+              case 8: return id(pressure_graph_minutes).state;
+              default: return 10.0f;
+            }
+          };
+
+          auto points_per_minute_for_metric = [&](int metric) -> float {
+            return metric == 8 ? 1.0f : 6.0f;
+          };
+          auto format_history_window = [](float minutes) -> std::string {
+            const int rounded = std::max(1, static_cast<int>(std::round(minutes)));
+            if (rounded >= 60) {
+              const float hours = static_cast<float>(rounded) / 60.0f;
+              if (std::fabs(hours - std::round(hours)) < 0.05f) {
+                char buffer[12];
+                snprintf(buffer, sizeof(buffer), "%.0fH", std::round(hours));
+                return std::string(buffer);
+              }
+              char buffer[12];
+              snprintf(buffer, sizeof(buffer), "%.1fH", hours);
+              return std::string(buffer);
+            }
+            char buffer[12];
+            snprintf(buffer, sizeof(buffer), "%dM", rounded);
+            return std::string(buffer);
+          };
+          auto pm_color_for = [](float value) -> lv_color_t {
+            if (value > 55.4f) return lv_color_hex(0xFF4D4D);
+            if (value > 35.4f) return lv_color_hex(0xFFA500);
+            if (value > 9.0f) return lv_color_hex(0xF4E66A);
+            return lv_color_hex(0x76FA76);
+          };
+
+          auto graph_color_for_metric = [&](int metric, float value) -> lv_color_t {
+            switch (metric) {
+              case 0:
+                if (value > 30.0f || value < 10.0f) return lv_color_hex(0xFF4D4D);
+                if (value > 27.0f || value < 16.0f) return lv_color_hex(0xFFA500);
+                if (value > 24.0f || value < 18.0f) return lv_color_hex(0xF4E66A);
+                return lv_color_hex(0x76FA76);
+              case 1:
+                if (value > 1500.0f) return lv_color_hex(0xFF4D4D);
+                if (value > 1000.0f) return lv_color_hex(0xFFA500);
+                if (value > 600.0f) return lv_color_hex(0xF4E66A);
+                return lv_color_hex(0x76FA76);
+              case 2:
+              case 3:
+              case 4:
+              case 5:
+                return pm_color_for(value);
+              case 6:
+                if (value > 400.0f) return lv_color_hex(0xFF4D4D);
+                if (value > 250.0f) return lv_color_hex(0xFFA500);
+                if (value > 150.0f) return lv_color_hex(0xF4E66A);
+                return lv_color_hex(0x76FA76);
+              case 7:
+                if (value > 70.0f || value < 10.0f) return lv_color_hex(0xFF4D4D);
+                if (value > 60.0f || value < 20.0f) return lv_color_hex(0xFFA500);
+                if (value > 50.0f || value < 30.0f) return lv_color_hex(0xF4E66A);
+                return lv_color_hex(0x76FA76);
+              case 8:
+                return lv_color_hex(0x8DD8FF);
+              default:
+                return lv_color_hex(0x76FA76);
+            }
+          };
+
+          auto set_row_palette = [&](int metric, lv_color_t active_color) {
+            const lv_color_t label_default = lv_color_hex(0xB8C7D1);
+            const lv_color_t unit_default = lv_color_hex(0x94A3AD);
+            auto reset_pair = [&](lv_obj_t *label, lv_obj_t *unit) {
+              lv_obj_set_style_text_color(label, label_default, LV_PART_MAIN);
+              lv_obj_set_style_text_color(unit, unit_default, LV_PART_MAIN);
+            };
+            auto activate_pair = [&](lv_obj_t *label, lv_obj_t *unit) {
+              lv_obj_set_style_text_color(label, active_color, LV_PART_MAIN);
+              lv_obj_set_style_text_color(unit, active_color, LV_PART_MAIN);
+            };
+
+            reset_pair(id(temperature_label), id(temperature_units));
+            reset_pair(id(co2_label), id(co2_units));
+            reset_pair(id(pm1_label), id(pm1_units));
+            reset_pair(id(pm25_label), id(pm25_units));
+            reset_pair(id(pm4_label), id(pm4_units));
+            reset_pair(id(pm10_label), id(pm10_units));
+            reset_pair(id(voc_label), id(voc_units));
+            reset_pair(id(rh_label), id(rh_units));
+            reset_pair(id(pressure_label), id(pressure_units));
+            lv_obj_set_style_text_color(id(pressure_trend_label), unit_default, LV_PART_MAIN);
+
+            switch (metric) {
+              case 0: activate_pair(id(temperature_label), id(temperature_units)); break;
+              case 1: activate_pair(id(co2_label), id(co2_units)); break;
+              case 2: activate_pair(id(pm1_label), id(pm1_units)); break;
+              case 3: activate_pair(id(pm25_label), id(pm25_units)); break;
+              case 4: activate_pair(id(pm4_label), id(pm4_units)); break;
+              case 5: activate_pair(id(pm10_label), id(pm10_units)); break;
+              case 6: activate_pair(id(voc_label), id(voc_units)); break;
+              case 7: activate_pair(id(rh_label), id(rh_units)); break;
+              case 8:
+                activate_pair(id(pressure_label), id(pressure_units));
+                lv_obj_set_style_text_color(id(pressure_trend_label), active_color, LV_PART_MAIN);
+                break;
+            }
+          };
+
+          const int metric = id(selected_graph_metric);
+          const std::vector<float> *selected_hist = &id(pm25_history);
+          float selected_baseline = 25.0f;
+          float selected_value = id(pm_2_5).has_state() ? id(pm_2_5).state : 0.0f;
+          float selected_delta_threshold = 3.0f;
+          std::string selected_title = "PM2.5";
+          std::string selected_value_text = "0.0 ug/m3";
+
+          switch (metric) {
+            case 0:
+              selected_hist = &id(temperature_history);
+              selected_baseline = 22.0f;
+              selected_value = id(sen55_temperature).has_state() ? id(sen55_temperature).state : 0.0f;
+              selected_delta_threshold = 0.4f;
+              selected_title = "TEMP";
+              {
+                char buffer[24];
+                if (id(display_temperature_unit).state == "Fahrenheit") {
+                  snprintf(buffer, sizeof(buffer), "%.1f °F", (selected_value * 9.0f / 5.0f) + 32.0f);
+                } else if (id(display_temperature_unit).state == "Kelvin") {
+                  snprintf(buffer, sizeof(buffer), "%.1f K", selected_value + 273.15f);
+                } else {
+                  snprintf(buffer, sizeof(buffer), "%.1f °C", selected_value);
+                }
+                selected_value_text = buffer;
+              }
+              break;
+            case 1:
+              selected_hist = &id(co2_history);
+              selected_baseline = 700.0f;
+              selected_value = id(co2).has_state() ? id(co2).state : 0.0f;
+              selected_delta_threshold = 80.0f;
+              selected_title = "CO2";
+              {
+                char buffer[24];
+                snprintf(buffer, sizeof(buffer), "%.0f ppm", selected_value);
+                selected_value_text = buffer;
+              }
+              break;
+            case 2:
+              selected_hist = &id(pm1_history);
+              selected_baseline = 15.0f;
+              selected_value = id(pm_1_0).has_state() ? id(pm_1_0).state : 0.0f;
+              selected_delta_threshold = 1.5f;
+              selected_title = "PM1";
+              {
+                char buffer[24];
+                snprintf(buffer, sizeof(buffer), "%.1f ug/m3", selected_value);
+                selected_value_text = buffer;
+              }
+              break;
+            case 3:
+              selected_hist = &id(pm25_history);
+              selected_baseline = 25.0f;
+              selected_value = id(pm_2_5).has_state() ? id(pm_2_5).state : 0.0f;
+              selected_delta_threshold = 3.0f;
+              selected_title = "PM2.5";
+              {
+                char buffer[24];
+                snprintf(buffer, sizeof(buffer), "%.1f ug/m3", selected_value);
+                selected_value_text = buffer;
+              }
+              break;
+            case 4:
+              selected_hist = &id(pm4_history);
+              selected_baseline = 25.0f;
+              selected_value = id(pm_4_0).has_state() ? id(pm_4_0).state : 0.0f;
+              selected_delta_threshold = 3.0f;
+              selected_title = "PM4";
+              {
+                char buffer[24];
+                snprintf(buffer, sizeof(buffer), "%.1f ug/m3", selected_value);
+                selected_value_text = buffer;
+              }
+              break;
+            case 5:
+              selected_hist = &id(pm10_history);
+              selected_baseline = 25.0f;
+              selected_value = id(pm_10_0).has_state() ? id(pm_10_0).state : 0.0f;
+              selected_delta_threshold = 3.0f;
+              selected_title = "PM10";
+              {
+                char buffer[24];
+                snprintf(buffer, sizeof(buffer), "%.1f ug/m3", selected_value);
+                selected_value_text = buffer;
+              }
+              break;
+            case 6:
+              selected_hist = &id(voc_history);
+              selected_baseline = 150.0f;
+              selected_value = id(sen55_voc).has_state() ? id(sen55_voc).state : 0.0f;
+              selected_delta_threshold = 20.0f;
+              selected_title = "VOC";
+              {
+                char buffer[24];
+                snprintf(buffer, sizeof(buffer), "%.0f IDX", selected_value);
+                selected_value_text = buffer;
+              }
+              break;
+            case 7:
+              selected_hist = &id(humidity_history);
+              selected_baseline = 45.0f;
+              selected_value = id(sen55_humidity).has_state() ? id(sen55_humidity).state : 0.0f;
+              selected_delta_threshold = 4.0f;
+              selected_title = "RH";
+              {
+                char buffer[24];
+                snprintf(buffer, sizeof(buffer), "%.0f %%", selected_value);
+                selected_value_text = buffer;
+              }
+              break;
+            case 8:
+              selected_hist = &id(pressure_history);
+              selected_baseline = 1013.0f;
+              selected_value = id(bme280pressure).has_state() ? id(bme280pressure).state : 0.0f;
+              selected_delta_threshold = 0.4f;
+              selected_title = "PRESS";
+              {
+                char buffer[24];
+                snprintf(buffer, sizeof(buffer), "%.0f hPa", selected_value);
+                selected_value_text = buffer;
+              }
+              break;
+          }
+
+          const float selected_minutes = minutes_for_metric(metric);
+          const std::vector<float> selected_hist_view = window_for_minutes(*selected_hist, selected_minutes, points_per_minute_for_metric(metric));
+          const float selected_delta = delta_for(selected_hist_view, std::min<size_t>(5, selected_hist_view.size() > 1 ? selected_hist_view.size() - 1 : 0));
+          std::string selected_meta = "STEADY";
+          if (selected_delta > selected_delta_threshold) {
+            selected_meta = "RISING";
+          } else if (selected_delta < -selected_delta_threshold) {
+            selected_meta = "FALLING";
+          }
+          const std::string selected_window = format_history_window(selected_minutes);
+          const std::string selected_header_meta = selected_window + " | " + selected_meta;
+
+          const lv_color_t selected_color = graph_color_for_metric(metric, selected_value);
+          draw_graph(id(selected_graph), selected_hist_view, selected_baseline, selected_color);
+          lv_label_set_text(id(selected_graph_label), selected_title.c_str());
+          lv_label_set_text(id(selected_graph_meta), selected_header_meta.c_str());
+          lv_label_set_text(id(selected_graph_value), selected_value_text.c_str());
+          lv_obj_set_style_text_color(id(selected_graph_label), selected_color, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(selected_graph_meta), selected_color, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(selected_graph_value), selected_color, LV_PART_MAIN);
+          set_row_palette(metric, selected_color);
+
+          const float pm_value = id(pm_2_5).has_state() ? id(pm_2_5).state : 0.0f;
+          const float voc_value = id(sen55_voc).has_state() ? id(sen55_voc).state : 0.0f;
+          const float pm_delta = delta_for(id(pm25_history), 5);
+          const float voc_delta = delta_for(id(voc_history), 5);
+          const lv_color_t pm_color = pm_color_for(pm_value);
+          const lv_color_t voc_color = graph_color_for_metric(6, voc_value);
+          std::string pm_meta = "STEADY";
+          if (pm_delta > 3.0f) {
+            pm_meta = "RISING";
+          } else if (pm_delta < -3.0f) {
+            pm_meta = "CLEARING";
+          }
+          std::string voc_meta = "STEADY";
+          if (voc_delta > 20.0f) {
+            voc_meta = "RISING";
+          } else if (voc_delta < -20.0f) {
+            voc_meta = "EASING";
+          }
+
+          draw_graph(id(pm25_graph_large), window_for_minutes(id(pm25_history), id(pm25_graph_minutes).state, 6.0f), 25.0f, pm_color);
+          draw_graph(id(voc_graph_large), window_for_minutes(id(voc_history), id(voc_graph_minutes).state, 6.0f), 150.0f, voc_color);
+          const std::string pm_history_title = "PM2.5 | " + format_history_window(id(pm25_graph_minutes).state);
+          const std::string voc_history_title = "VOC | " + format_history_window(id(voc_graph_minutes).state);
+          char pm_buf[24];
+          snprintf(pm_buf, sizeof(pm_buf), "%.1f ug/m3", pm_value);
+          lv_label_set_text(id(trends_pm_value), pm_buf);
+          lv_label_set_text(id(trends_pm_title), pm_history_title.c_str());
+          lv_obj_set_style_text_color(id(trends_pm_value), pm_color, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(trends_pm_title), pm_color, LV_PART_MAIN);
+          char voc_buf[24];
+          snprintf(voc_buf, sizeof(voc_buf), "%.0f IDX", voc_value);
+          lv_label_set_text(id(trends_voc_value), voc_buf);
+          lv_label_set_text(id(trends_voc_title), voc_history_title.c_str());
+          lv_obj_set_style_text_color(id(trends_voc_value), voc_color, LV_PART_MAIN);
+          lv_obj_set_style_text_color(id(trends_voc_title), voc_color, LV_PART_MAIN);
+          lv_label_set_text(id(trends_hint_label), "Tap rows on overview to switch history");
+
+number:
+  - platform: template
+    name: "LED: Day Brightness"
+    id: auto_led_brightness
+    restore_value: true
+    initial_value: 70
+    min_value: 40
+    max_value: 100
+    entity_category: "config"
+    unit_of_measurement: "%"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: slider
+    on_value:
+      - script.execute: update_air_quality_leds
+  - platform: template
+    name: "LED: Night Brightness"
+    id: night_auto_led_brightness
+    restore_value: true
+    initial_value: 20
+    min_value: 5
+    max_value: 70
+    entity_category: "config"
+    unit_of_measurement: "%"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: slider
+    on_value:
+      - script.execute: update_air_quality_leds
+  - platform: template
+    name: "Display: Day Brightness"
+    id: display_day_brightness
+    restore_value: true
+    initial_value: 100
+    min_value: 30
+    max_value: 100
+    entity_category: "config"
+    unit_of_measurement: "%"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: slider
+    on_value:
+      - script.execute: update_display_brightness
+  - platform: template
+    name: "Display: Night Brightness"
+    id: display_night_brightness
+    restore_value: true
+    initial_value: 18
+    min_value: 5
+    max_value: 70
+    entity_category: "config"
+    unit_of_measurement: "%"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: slider
+    on_value:
+      - script.execute: update_display_brightness
+  - platform: template
+    name: "Display: Night Start Hour"
+    id: night_mode_start_hour
+    restore_value: true
+    initial_value: 22
+    min_value: 0
+    max_value: 23
+    entity_category: "config"
+    unit_of_measurement: "h"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: update_display_brightness
+      - script.execute: update_air_quality_leds
+  - platform: template
+    name: "Display: Night End Hour"
+    id: night_mode_end_hour
+    restore_value: true
+    initial_value: 7
+    min_value: 0
+    max_value: 23
+    entity_category: "config"
+    unit_of_measurement: "h"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: update_display_brightness
+      - script.execute: update_air_quality_leds
+  - platform: template
+    name: "Graph: Switch Interval"
+    id: graph_switch_interval
+    restore_value: true
+    initial_value: 10
+    min_value: 3
+    max_value: 120
+    entity_category: "config"
+    unit_of_measurement: "s"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - lambda: 'id(last_graph_switch_ms) = millis();'
+  - platform: template
+    name: "Graph: Temp Minutes"
+    id: temperature_graph_minutes
+    restore_value: true
+    initial_value: 10
+    min_value: 5
+    max_value: 30
+    entity_category: "config"
+    unit_of_measurement: "min"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: CO2 Minutes"
+    id: co2_graph_minutes
+    restore_value: true
+    initial_value: 10
+    min_value: 5
+    max_value: 30
+    entity_category: "config"
+    unit_of_measurement: "min"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: PM1 Minutes"
+    id: pm1_graph_minutes
+    restore_value: true
+    initial_value: 10
+    min_value: 5
+    max_value: 30
+    entity_category: "config"
+    unit_of_measurement: "min"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: PM2.5 Minutes"
+    id: pm25_graph_minutes
+    restore_value: true
+    initial_value: 10
+    min_value: 5
+    max_value: 30
+    entity_category: "config"
+    unit_of_measurement: "min"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: PM4 Minutes"
+    id: pm4_graph_minutes
+    restore_value: true
+    initial_value: 10
+    min_value: 5
+    max_value: 30
+    entity_category: "config"
+    unit_of_measurement: "min"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: PM10 Minutes"
+    id: pm10_graph_minutes
+    restore_value: true
+    initial_value: 10
+    min_value: 5
+    max_value: 30
+    entity_category: "config"
+    unit_of_measurement: "min"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: VOC Minutes"
+    id: voc_graph_minutes
+    restore_value: true
+    initial_value: 10
+    min_value: 5
+    max_value: 30
+    entity_category: "config"
+    unit_of_measurement: "min"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: RH Minutes"
+    id: humidity_graph_minutes
+    restore_value: true
+    initial_value: 10
+    min_value: 5
+    max_value: 30
+    entity_category: "config"
+    unit_of_measurement: "min"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Graph: Pressure Minutes"
+    id: pressure_graph_minutes
+    restore_value: true
+    initial_value: 360
+    min_value: 30
+    max_value: 360
+    entity_category: "config"
+    unit_of_measurement: "min"
+    optimistic: true
+    update_interval: never
+    step: 1
+    mode: box
+    on_value:
+      - script.execute: redraw_graphs
+  - platform: template
+    name: "Sensor: Temperature Offset"
+    id: sen55_temperature_offset
+    restore_value: true
+    initial_value: 6.0
+    min_value: -70.0
+    max_value: 70.0
+    entity_category: "config"
+    unit_of_measurement: "°C"
+    optimistic: true
+    update_interval: never
+    step: 0.1
+    mode: box
+  - platform: template
+    name: "Sensor: Humidity Offset"
+    id: sen55_humidity_offset
+    restore_value: true
+    initial_value: 0
+    min_value: -70.0
+    max_value: 70.0
+    entity_category: "config"
+    unit_of_measurement: "%"
+    optimistic: true
+    update_interval: never
+    step: 0.1
+    mode: box
+
+binary_sensor:
+  - platform: status
+    name: Online
+    id: ink_ha_connected    
+
+sensor:
+  - platform: uptime
+    name: Uptime
+    id: sys_uptime
+    update_interval: 60s
+
+  - platform: wifi_signal
+    name: RSSI
+    id: wifi_signal_db
+    update_interval: 60s
+    entity_category: "diagnostic"
+
+  - platform: template
+    name: "Computed AQI"
+    id: computed_halo_aqi
+    unit_of_measurement: "AQI"
+    accuracy_decimals: 0
+    device_class: "aqi"
+    state_class: "measurement"
+    update_interval: never  # We'll update it manually
+  - platform: template
+    name: "Pressure Delta 1h"
+    id: pressure_delta_1h
+    unit_of_measurement: "hPa"
+    accuracy_decimals: 1
+    state_class: "measurement"
+    entity_category: "diagnostic"
+    update_interval: never
+  - platform: template
+    name: "Pressure Delta 3h"
+    id: pressure_delta_3h
+    unit_of_measurement: "hPa"
+    accuracy_decimals: 1
+    state_class: "measurement"
+    entity_category: "diagnostic"
+    update_interval: never
+  - platform: template
+    name: "Pressure Delta 6h"
+    id: pressure_delta_6h
+    unit_of_measurement: "hPa"
+    accuracy_decimals: 1
+    state_class: "measurement"
+    entity_category: "diagnostic"
+    update_interval: never
+
+  - platform: scd4x
+    id: scd40
+    co2:
+      name: "CO2"
+      id: "co2"
+      on_value:
+        then:
+          - lambda: |-
+              auto &hist = id(co2_history);
+              if (hist.size() != 360) {
+                hist.assign(360, x);
+              }
+              for (size_t i = 0; i + 1 < hist.size(); i++) {
+                hist[i] = hist[i + 1];
+              }
+              hist.back() = x;
+          - lvgl.label.update:
+              id: co2_value
+              text: !lambda |-
+                static char buffer[10];
+                snprintf(buffer, sizeof(buffer), "%d", (int)x);
+                return buffer;
+          - if:
+              condition:
+                lambda: "return x <= 600;"
+              then:
+                - lvgl.label.update:
+                    id: co2_value
+                    text_color: my_green                     
+              else:
+                - if:
+                    condition:
+                      lambda: "return x <= 1000;"
+                    then:
+                      - lvgl.label.update:
+                          id: co2_value
+                          text_color: my_yellow                         
+                    else:
+                      - if:
+                          condition:
+                            lambda: "return x <= 1500;"
+                          then:
+                            - lvgl.label.update:
+                                id: co2_value
+                                text_color: my_orange                                 
+                          else:
+                            - lvgl.label.update:
+                                id: co2_value
+                                text_color: my_red
+          - script.execute: redraw_graphs
+          - script.execute: update_alert_state
+          - script.execute: update_footer_summary
+    automatic_self_calibration: false
+    update_interval: 10s
+    measurement_mode: "periodic"
+    i2c_id: lily_i2c
+    ambient_pressure_compensation_source: bme280pressure
+
+  - platform: bme280_i2c
+    i2c_id: lily_i2c
+    address: 0x76
+    update_interval: 60s
+    temperature:
+      name: "BME280 Temperature"
+      oversampling: 2x
+      # filters:
+      #   - lambda: |-
+      #       return x;  
+    pressure:
+      name: "BME280 Pressure"
+      id: bme280pressure
+      on_value:
+        then:
+          - lambda: |-
+              auto &hist = id(pressure_history);
+              if (hist.size() != 360) {
+                hist.assign(360, x);
+              }
+              for (size_t i = 0; i + 1 < hist.size(); i++) {
+                hist[i] = hist[i + 1];
+              }
+              hist.back() = x;
+          - lvgl.label.update:
+              id: pressure_value
+              text: !lambda |-
+                static char buffer[10];
+                snprintf(buffer, sizeof(buffer), "%.0f", x);
+                return buffer;
+          - script.execute: redraw_graphs
+          - script.execute: update_pressure_trend
+          - script.execute: update_footer_summary
+    humidity:
+      name: "BME280 Humidity"    
+
+  - platform: sen5x
+    id: sen55
+    pm_1_0:
+      name: "PM <1µm Weight concentration"
+      id: pm_1_0
+      accuracy_decimals: 1
+      on_value:
+        then:
+          - lambda: |-
+              auto &hist = id(pm1_history);
+              if (hist.size() != 180) {
+                hist.assign(180, 0.0f);
+              }
+              for (size_t i = 0; i + 1 < hist.size(); i++) {
+                hist[i] = hist[i + 1];
+              }
+              hist.back() = x;
+          - lvgl.label.update:
+              id: pm1_value
+              text: !lambda |-
+                static char buffer[10];
+                snprintf(buffer, sizeof(buffer), "%.01f", x);
+                return buffer;
+          - script.execute: redraw_graphs
+    pm_2_5:
+      name: "PM <2.5µm Weight concentration"
+      id: pm_2_5
+      accuracy_decimals: 1
+      on_value:
+        then:
+          - lambda: |-
+              auto &hist = id(pm25_history);
+              if (hist.size() != 180) {
+                hist.assign(180, 0.0f);
+              }
+              for (size_t i = 0; i + 1 < hist.size(); i++) {
+                hist[i] = hist[i + 1];
+              }
+              hist.back() = x;
+          - lvgl.label.update:
+              id: pm25_value
+              text: !lambda |-
+                static char buffer[10];
+                snprintf(buffer, sizeof(buffer), "%.01f", x);
+                return buffer;
+          - lvgl.label.update:
+              id: aqi_value
+              text: !lambda |-
+                float val = x; // PM2.5 value
+                float aqi = 0.0;
+
+                if (val <= 9.0) {
+                  aqi = ((50.0 - 0.0) / (9.0 - 0.0)) * (val - 0.0) + 0.0;
+                } else if (val <= 35.4) {
+                  aqi = ((100.0 - 51.0) / (35.4 - 9.1)) * (val - 9.1) + 51.0;
+                } else if (val <= 55.4) {
+                  aqi = ((150.0 - 101.0) / (55.4 - 35.5)) * (val - 35.5) + 101.0;
+                } else if (val <= 125.4) {
+                  aqi = ((200.0 - 151.0) / (125.4 - 55.5)) * (val - 55.5) + 151.0;
+                } else if (val <= 225.4) {
+                  aqi = ((300.0 - 201.0) / (225.4 - 125.5)) * (val - 125.5) + 201.0;
+                } else if (val <= 500.4) {
+                  aqi = ((500.0 - 301.0) / (500.4 - 250.5)) * (val - 250.5) + 301.0;
+                } else {
+                  return "EVAC";
+                }
+
+                static char buffer[10];
+                snprintf(buffer, sizeof(buffer), " %d", (int)aqi);
+                return buffer;
+
+          - lvgl.widget.update:
+              id: aqi_widget
+              bg_color: !lambda |-
+                float val = x; // PM2.5 value
+                float aqi = 0.0;
+
+                if (val <= 9.0) {
+                  aqi = ((50.0 - 0.0) / (9.0 - 0.0)) * (val - 0.0) + 0.0;
+                } else if (val <= 35.4) {
+                  aqi = ((100.0 - 51.0) / (35.4 - 9.1)) * (val - 9.1) + 51.0;
+                } else if (val <= 55.4) {
+                  aqi = ((150.0 - 101.0) / (55.4 - 35.5)) * (val - 35.5) + 101.0;
+                } else if (val <= 125.4) {
+                  aqi = ((200.0 - 151.0) / (125.4 - 55.5)) * (val - 55.5) + 151.0;
+                } else if (val <= 225.4) {
+                  aqi = ((300.0 - 201.0) / (225.4 - 125.5)) * (val - 125.5) + 201.0;
+                } else if (val <= 500.4) {
+                  aqi = ((500.0 - 301.0) / (500.4 - 250.5)) * (val - 250.5) + 301.0;
+                } else {
+                  aqi = 500.0;
+                }
+                id(computed_halo_aqi).publish_state((int)aqi);
+
+                // Return color based on AQI
+                if (aqi <= 50) {
+                  return lv_color_hex(0x76fa76); // Green
+                } else if (aqi <= 100) {
+                  return lv_color_hex(0xFFFF00); // Yellow
+                } else if (aqi <= 150) {
+                  return lv_color_hex(0xFFA500); // Orange
+                } else if (aqi <= 200) {
+                  return lv_color_hex(0xFF0000); // Red
+                } else if (aqi <= 300) {
+                  return lv_color_hex(0x800080); // Purple
+                } else {
+                  return lv_color_hex(0x800000); // Maroon
+                }        
+          - script.execute: update_air_quality_leds
+          - script.execute: redraw_graphs
+          - script.execute: update_alert_state
+          - script.execute: update_footer_summary
+          - lvgl.label.update:
+              id: trends_voc_quality_value
+              text: !lambda |-
+                if (x < 80) return "Improved";
+                if (x < 150) return "Normal";
+                if (x < 250) return "Abnormal";
+                if (x < 400) return "Very abnormal";
+                return "Extreme";
+
+    pm_4_0:
+      name: "PM <4µm Weight concentration"
+      id: pm_4_0
+      accuracy_decimals: 1
+      on_value:
+        then:
+          - lambda: |-
+              auto &hist = id(pm4_history);
+              if (hist.size() != 180) {
+                hist.assign(180, 0.0f);
+              }
+              for (size_t i = 0; i + 1 < hist.size(); i++) {
+                hist[i] = hist[i + 1];
+              }
+              hist.back() = x;
+          - lvgl.label.update:
+              id: pm4_value
+              text: !lambda |-
+                static char buffer[10];
+                snprintf(buffer, sizeof(buffer), "%.01f", x);
+                return buffer;
+          - script.execute: redraw_graphs
+    pm_10_0:
+      name: "PM <10µm Weight concentration"
+      id: pm_10_0
+      accuracy_decimals: 1
+      on_value:
+        then:
+          - lambda: |-
+              auto &hist = id(pm10_history);
+              if (hist.size() != 180) {
+                hist.assign(180, 0.0f);
+              }
+              for (size_t i = 0; i + 1 < hist.size(); i++) {
+                hist[i] = hist[i + 1];
+              }
+              hist.back() = x;
+          - lvgl.label.update:
+              id: pm10_value
+              text: !lambda |-
+                static char buffer[10];
+                snprintf(buffer, sizeof(buffer), "%.01f", x);
+                return buffer;
+          - script.execute: redraw_graphs
+    temperature:
+      name: "SEN55 Temperature"
+      id: sen55_temperature
+      accuracy_decimals: 1
+      filters:
+        - offset: !lambda return -1.0 * id(sen55_temperature_offset).state;
+      on_value:
+        then:
+          - lambda: |-
+              auto &hist = id(temperature_history);
+              if (hist.size() != 180) {
+                hist.assign(180, x);
+              }
+              for (size_t i = 0; i + 1 < hist.size(); i++) {
+                hist[i] = hist[i + 1];
+              }
+              hist.back() = x;
+          - if:
+              condition:
+                lambda: "return temp_unit_changed;"
+              then:
+                - lvgl.label.update:
+                    id: temperature_units
+                    text: !lambda |-
+                      if(id(display_temperature_unit).state == "Fahrenheit")
+                        return "\u00B0F";
+                      else if(id(display_temperature_unit).state == "Kelvin")
+                        return "K";
+                      return "\u00B0C";
+                - globals.set:
+                    id: temp_unit_changed
+                    value: "false"
+          - lvgl.label.update:
+              id: temperature_value
+              text: !lambda |-
+                static char buffer[10];
+                if(id(display_temperature_unit).state == "Fahrenheit")
+                  snprintf(buffer, sizeof(buffer), "%.01f", (x * 9.0 / 5.0) + 32.0);
+                else if(id(display_temperature_unit).state == "Kelvin")
+                  snprintf(buffer, sizeof(buffer), "%.01f", x + 273.15);
+                else
+                  snprintf(buffer, sizeof(buffer), "%.01f", x);
+                return buffer;
+          - if:
+              condition:
+                lambda: "return x >= 18 && x <= 24;"  # Comfortable temperature range (°C)
+              then:
+                - lvgl.label.update:
+                    id: temperature_value
+                    text_color: my_green
+              else:
+                - if:
+                    condition:
+                      lambda: "return (x > 24 && x <= 27) || (x >= 16 && x < 18);"  # Slightly uncomfortable (°C)
+                    then:
+                      - lvgl.label.update:
+                          id: temperature_value
+                          text_color: my_yellow
+                    else:
+                      - if:
+                          condition:
+                            lambda: "return (x > 27 && x <= 30) || (x >= 10 && x < 16);"  # Moderately uncomfortable (°C)
+                          then:
+                            - lvgl.label.update:
+                                id: temperature_value
+                                text_color: my_orange
+                          else:
+                            - lvgl.label.update:
+                                id: temperature_value
+                                text_color: my_red  # Extreme discomfort or unsafe (°C)
+          - script.execute: redraw_graphs
+    humidity:
+      name: "SEN55 Humidity"
+      id: sen55_humidity
+      filters:
+        - lambda: return x - id(sen55_humidity_offset).state;
+      accuracy_decimals: 0
+      on_value:
+        then:
+          - lambda: |-
+              auto &hist = id(humidity_history);
+              if (hist.size() != 180) {
+                hist.assign(180, x);
+              }
+              for (size_t i = 0; i + 1 < hist.size(); i++) {
+                hist[i] = hist[i + 1];
+              }
+              hist.back() = x;
+          - lvgl.label.update:
+              id: rh_value
+              text: !lambda |-
+                static char buffer[10];
+                snprintf(buffer, sizeof(buffer), "%d", (int)x);
+                return buffer;
+          - if:
+              condition:
+                lambda: "return x >= 30 && x <= 50;"  # Optimal indoor comfort range (%)
+              then:
+                - lvgl.label.update:
+                    id: rh_value
+                    text_color: my_green
+              else:
+                - if:
+                    condition:
+                      lambda: "return (x > 50 && x <= 60) || (x >= 20 && x < 30);"  # Slightly out of comfort range (%)
+                    then:
+                      - lvgl.label.update:
+                          id: rh_value
+                          text_color: my_yellow
+                    else:
+                      - if:
+                          condition:
+                            lambda: "return (x > 60 && x <= 70) || (x >= 10 && x < 20);"  # Moderately uncomfortable (%)
+                          then:
+                            - lvgl.label.update:
+                                id: rh_value
+                                text_color: my_orange
+                          else:
+                            - lvgl.label.update:
+                                id: rh_value
+                                text_color: my_red  # Very uncomfortable or potentially hazardous (%)                             
+          - script.execute: redraw_graphs
+          - script.execute: update_footer_summary
+    voc:
+      name: "SEN55 VOC"
+      id: sen55_voc
+      algorithm_tuning:
+        #https://sensirion.com/media/documents/25AB572C/62B463AA/Sensirion_Engineering_Guidelines_SEN5x.pdf
+        index_offset: 100
+        learning_time_offset_hours: 72
+        learning_time_gain_hours: 72
+        gating_max_duration_minutes: 180
+        std_initial: 50
+        gain_factor: 230
+      on_value:
+        then:
+          - lambda: |-
+              auto &hist = id(voc_history);
+              if (hist.size() != 180) {
+                hist.assign(180, 0.0f);
+              }
+              for (size_t i = 0; i + 1 < hist.size(); i++) {
+                hist[i] = hist[i + 1];
+              }
+              hist.back() = x;
+          - lvgl.label.update:
+              id: voc_value
+              text: !lambda |-
+                static char buffer[10];
+                snprintf(buffer, sizeof(buffer), "%3d", (int)x);
+                return buffer;
+          - if:
+              condition:
+                lambda: "return x < 150;"
+              then:
+                - lvgl.label.update:
+                    id: voc_value
+                    text_color: my_green
+              else:
+                - if:
+                    condition:
+                      lambda: "return x <= 250;"
+                    then:
+                      - lvgl.label.update:
+                          id: voc_value
+                          text_color: my_yellow
+                    else:
+                      - if:
+                          condition:
+                            lambda: "return x <= 400;"
+                          then:
+                            - lvgl.label.update:
+                                id: voc_value
+                                text_color: my_orange
+                          else:
+                            - lvgl.label.update:
+                                id: voc_value
+                                text_color: my_red
+          - script.execute: redraw_graphs
+          - script.execute: update_air_quality_leds
+          - script.execute: update_alert_state
+          - script.execute: update_footer_summary
+    i2c_id: lily_i2c
+    address: 0x69
+    update_interval: 10s    
+
+button:
+  - platform: restart
+    icon: mdi:power-cycle
+    name: "System: Reboot"
+
+  - platform: factory_reset
+    disabled_by_default: True
+    name: "System: Factory Reset"
+    id: factory_reset_all
+
+  - platform: template
+    name: "Sensor: Calibrate CO2"
+    id: set_SCD40_calibrate
+    on_press:
+      - scd4x.perform_forced_calibration:
+          value: 420
+          id: scd40
+
+  - platform: template
+    name: "Sensor: Clean SEN55"
+    id: clean_sen55
+    on_press:
+      - sen5x.start_fan_autoclean: sen55
+
+text_sensor:
+    # Convert VOC Index To Text: 
+    # https://sensirion.com/media/documents/02232963/6294E043/Info_Note_VOC_Index.pdf
+    # https://sensirion.com/media/documents/ACD82D45/6294DFC0/Info_Note_Integration_VOC_NOx_Sensor.pdf
+  - platform: template
+    name: "Air Alert State"
+    id: air_alert_state
+    icon: mdi:alert-circle-outline
+    entity_category: "diagnostic"
+    update_interval: never
+  - platform: template
+    name: "Pressure Trend"
+    id: pressure_trend_state
+    icon: mdi:trending-up
+    entity_category: "diagnostic"
+    update_interval: never
+  - platform: template
+    name: "Pressure Weather Message"
+    id: pressure_weather_message
+    icon: mdi:weather-partly-lightning
+    entity_category: "diagnostic"
+    update_interval: never
+  - platform: template
+    name: "Air Summary"
+    id: air_summary_text
+    icon: mdi:text-box-outline
+    entity_category: "diagnostic"
+    update_interval: never
+  - platform: template
+    name: "Comfort Summary"
+    id: comfort_summary_text
+    icon: mdi:sofa-outline
+    entity_category: "diagnostic"
+    update_interval: never
+  - platform: template
+    name: "VOC Quality"
+    id: voc_quality
+    icon: mdi:air-filter
+    lambda: |-
+      if (id(sen55_voc).state < 80) {
+        return std::string("Improved");} 
+      else if (id(sen55_voc).state < 150) {
+        return std::string("Normal");} 
+      else if (id(sen55_voc).state < 250) {
+        return std::string("Abnormal");} 
+      else if (id(sen55_voc).state < 400) {
+        return std::string("Very abnormal");} 
+      else {
+        return std::string("Extremely abnormal");}    
+
+light:
+  # - platform: esp32_rmt_led_strip
+  #   id: rgb_light
+  #   name: "Halo"
+  #   pin: GPIO47
+  #   rgb_order: GRB
+  #   default_transition_length: 2s
+  #   chipset: SK6812
+  #   num_leds: 11
+  #   effects:
+  #     - pulse:
+  #         name: "Slow Pulse" 
+  #         transition_length: 500ms
+  #         update_interval: 500ms
+  #         min_brightness: 10%
+  #         max_brightness: 50%
+  #     - addressable_rainbow:
+  #         name: Rainbow Effect With Custom Values
+  #         speed: 10
+  #         width: 50
+
+  - platform: esp32_rmt_led_strip
+    name: Halo
+    id: rgb_light
+    rgb_order: GRB
+    pin: GPIO47
+    num_leds: ${led_count}
+    chipset: WS2812
+    restore_mode: RESTORE_AND_OFF
+    effects:
+      - addressable_rainbow:
+          name: Addressable Rainbow
+
+  - platform: monochromatic
+    id: display_backlight
+    output: backlight
+    name: "Display Backlight"
+    restore_mode: ALWAYS_ON
+
+lvgl:
+  displays:
+    - lily_display
+  touchscreens:
+    - lily_touch
+  buffer_size: 100%
+  page_wrap: true
+  on_idle:
+    - timeout: 45s
+      then:
+        - if:
+            condition:
+              and:
+                - lambda: 'return id(display_sleep_mode).state == "Auto Off";'
+                - light.is_on: display_backlight
+            then:
+              - light.turn_on:
+                  id: display_backlight
+                  brightness: 12%
+                  transition_length: 500ms
+    - timeout: 120s
+      then:
+        - if:
+            condition:
+              and:
+                - lambda: 'return id(display_sleep_mode).state == "Auto Off";'
+                - light.is_on: display_backlight
+            then:
+              - light.turn_off:
+                  id: display_backlight
+                  transition_length: 700ms
+  top_layer:
+    widgets:
+      - image:
+          id: ym_image
+          src: ym_logo
+          align: CENTER
+          x: 80
+          y: -309
+      - label:
+          id: timeVal
+          align: LEFT_MID
+          text_font: montserrat_18
+          text_color: my_white
+          x: 2
+          y: -309
+          text: "00:00AM"
+      - label:
+          id: wifi_stat
+          align: CENTER
+          text_font: montserrat_18
+          text_color: my_gray
+          x: 42
+          y: -309
+          text: "\uF1EB"
+      - obj:
+          id: page_dot_1
+          align: CENTER
+          x: -14
+          y: -309
+          width: 6
+          height: 6
+          radius: 3
+          bg_color: 0x76FA76
+          border_width: 0
+          outline_width: 0
+          shadow_width: 0
+      - obj:
+          id: page_dot_2
+          align: CENTER
+          x: 0
+          y: -309
+          width: 6
+          height: 6
+          radius: 3
+          bg_color: 0x35525A
+          border_width: 0
+          outline_width: 0
+          shadow_width: 0
+      - obj:
+          id: page_dot_3
+          align: CENTER
+          x: 14
+          y: -309
+          width: 6
+          height: 6
+          radius: 3
+          bg_color: 0x35525A
+          border_width: 0
+          outline_width: 0
+          shadow_width: 0
+      - label:
+          id: page_dots_label
+          align: CENTER
+          text_font: montserrat_12
+          hidden: true
+          text_color: my_black
+          y: -309
+          text: "● ○ ○"
+  pages:            
+    - id: main_page
+      bg_color: my_black
+      scrollbar_mode: "OFF"
+      widgets:
+# AQI box
+        - obj:
+            id: aqi_widget
+            x: 0
+            y: 24
+            width: 180
+            height: 42
+            bg_color: 0x76fa76
+            border_width: 0
+        - label:
+            id: aqi_label
+            align: LEFT_MID
+            text_font: montserrat_28
+            text_color: my_black
+            long_mode: WRAP
+            x: 2
+            y: -275
+            text: "AQI:"
+        - label:
+            id: aqi_value
+            align: LEFT_MID
+            text_font: montserrat_28
+            text_color: my_black
+            long_mode: WRAP
+            x: 90
+            y: -275
+            text: "000"                              
+        - label:
+            id: aqi_alert_label
+            align: RIGHT_MID
+            text_font: montserrat_12
+            text_color: my_black
+            long_mode: WRAP
+            x: -8
+            y: -275
+            text: ""
+# Temperature box
+        - label:
+            id: temperature_label
+            align: LEFT_MID
+            text_font: montserrat_14
+            text_color: my_label
+            long_mode: WRAP
+            x: 2
+            y: -246
+            text: "TEMP:"               
+        - label:
+            id: temperature_value
+            align: RIGHT_MID
+            text_font: montserrat_28
+            text_color: my_white
+            long_mode: WRAP
+            x: -42
+            y: -234
+            text: "000.0" 
+        - label:
+            id: temperature_units
+            align: RIGHT_MID
+            text_font: montserrat_14
+            text_color: my_unit
+            long_mode: WRAP
+            x: -8
+            y: -234
+            text: "\u00B0F"                     
+        - line:
+            points:
+              - 0, 106
+              - 180, 106
+            line_width: 1
+            line_color: my_divider
+# CO2 box
+        - label:
+            id: co2_label
+            align: LEFT_MID
+            text_font: montserrat_14
+            text_color: my_label
+            long_mode: WRAP
+            x: 2
+            y: -205
+            text: "CO2:"               
+        - label:
+            id: co2_value
+            align: RIGHT_MID
+            text_font: montserrat_28
+            text_color: my_white
+            long_mode: WRAP
+            x: -44
+            y: -193
+            text: "0000" 
+        - label:
+            id: co2_units
+            align: RIGHT_MID
+            text_font: montserrat_14
+            text_color: my_unit
+            long_mode: WRAP
+            x: -2
+            y: -193
+            text: "PPM"                     
+        - line:
+            points:
+              - 0, 147
+              - 180, 147
+            line_width: 1
+            line_color: my_divider                              
+# PM1 box
+        - label:
+            id: pm1_label
+            align: LEFT_MID
+            text_font: montserrat_14
+            text_color: my_label
+            long_mode: WRAP
+            x: 2
+            y: -164
+            text: "PM1:"               
+        - label:
+            id: pm1_value
+            align: RIGHT_MID
+            text_font: montserrat_28
+            text_color: my_white
+            long_mode: WRAP
+            x: -51
+            y: -152
+            text: "000.0" 
+        - label:
+            id: pm1_units
+            align: RIGHT_MID
+            text_font: montserrat_14
+            text_color: my_unit
+            long_mode: WRAP
+            x: -2
+            y: -152
+            text: "ug/m3"                     
+        - line:
+            points:
+              - 0, 188
+              - 180, 188
+            line_width: 1
+            line_color: my_divider             
+# PM2.5 box
+        - label:
+            id: pm25_label
+            align: LEFT_MID
+            text_font: montserrat_14
+            text_color: my_label
+            long_mode: WRAP
+            x: 2
+            y: -123
+            text: "PM2.5:"               
+        - label:
+            id: pm25_value
+            align: RIGHT_MID
+            text_font: montserrat_28
+            text_color: my_white
+            long_mode: WRAP
+            x: -51
+            y: -111
+            text: "000.0" 
+        - label:
+            id: pm25_units
+            align: RIGHT_MID
+            text_font: montserrat_14
+            text_color: my_unit
+            long_mode: WRAP
+            x: -2
+            y: -111
+            text: "ug/m3"                     
+        - line:
+            points:
+              - 0, 229
+              - 180, 229
+            line_width: 1
+            line_color: my_divider              
+# PM4 box
+        - label:
+            id: pm4_label
+            align: LEFT_MID
+            text_font: montserrat_14
+            text_color: my_label
+            long_mode: WRAP
+            x: 2
+            y: -82
+            text: "PM4:"               
+        - label:
+            id: pm4_value
+            align: RIGHT_MID
+            text_font: montserrat_28
+            text_color: my_white
+            long_mode: WRAP
+            x: -51
+            y: -70
+            text: "000.0" 
+        - label:
+            id: pm4_units
+            align: RIGHT_MID
+            text_font: montserrat_14
+            text_color: my_unit
+            long_mode: WRAP
+            x: -2
+            y: -70
+            text: "ug/m3"                     
+        - line:
+            points:
+              - 0, 270
+              - 180, 270
+            line_width: 1
+            line_color: my_divider 
+# PM10 box
+        - label:
+            id: pm10_label
+            align: LEFT_MID
+            text_font: montserrat_14
+            text_color: my_label
+            long_mode: WRAP
+            x: 2
+            y: -41
+            text: "PM10:"               
+        - label:
+            id: pm10_value
+            align: RIGHT_MID
+            text_font: montserrat_28
+            text_color: my_white
+            long_mode: WRAP
+            x: -51
+            y: -29
+            text: "000.0" 
+        - label:
+            id: pm10_units
+            align: RIGHT_MID
+            text_font: montserrat_14
+            text_color: my_unit
+            long_mode: WRAP
+            x: -2
+            y: -29
+            text: "ug/m3"                     
+        - line:
+            points:
+              - 0, 311
+              - 180, 311
+            line_width: 1
+            line_color: my_divider
+# VOC box
+        - label:
+            id: voc_label
+            align: LEFT_MID
+            text_font: montserrat_14
+            text_color: my_label
+            long_mode: WRAP
+            x: 2
+            y: 0
+            text: "VOC:"               
+        - label:
+            id: voc_value
+            align: RIGHT_MID
+            text_font: montserrat_28
+            text_color: my_white
+            long_mode: WRAP
+            x: -51
+            y: 12
+            text: "000.0"               
+        - label:
+            id: voc_units
+            align: RIGHT_MID
+            text_font: montserrat_14
+            text_color: my_unit
+            long_mode: WRAP
+            x: -2
+            y: 12
+            text: "IDX"                     
+        - line:
+            points:
+              - 0, 352
+              - 180, 352
+            line_width: 1
+            line_color: my_divider
+# RH box
+        - label:
+            id: rh_label
+            align: LEFT_MID
+            text_font: montserrat_14
+            text_color: my_label
+            long_mode: WRAP
+            x: 2
+            y: 41
+            text: "RH:"              
+        - label:
+            id: rh_value
+            align: RIGHT_MID
+            text_font: montserrat_28
+            text_color: my_white
+            long_mode: WRAP
+            x: -51
+            y: 53
+            text: "000.0" 
+        - label:
+            id: rh_units
+            align: RIGHT_MID
+            text_font: montserrat_14
+            text_color: my_unit
+            long_mode: WRAP
+            x: -2
+            y: 53
+            text: "%"
+        - line:
+            points:
+              - 0, 393
+              - 180, 393
+            line_width: 1
+            line_color: my_divider
+# Pressure box
+        - label:
+            id: pressure_label
+            align: LEFT_MID
+            text_font: montserrat_14
+            text_color: my_label
+            long_mode: WRAP
+            x: 2
+            y: 82
+            text: "PRES:"
+        - label:
+            id: pressure_value
+            align: RIGHT_MID
+            text_font: montserrat_28
+            text_color: my_white
+            long_mode: WRAP
+            x: -51
+            y: 94
+            text: "0000"
+        - label:
+            id: pressure_units
+            align: RIGHT_MID
+            text_font: montserrat_14
+            text_color: my_unit
+            long_mode: WRAP
+            x: -2
+            y: 94
+            text: "hPa"
+        - label:
+            id: pressure_trend_label
+            align: RIGHT_MID
+            text_font: montserrat_12
+            text_color: my_unit
+            long_mode: WRAP
+            x: -2
+            y: 80
+            text: "STDY"
+        - line:
+            points:
+              - 0, 434
+              - 180, 434
+            line_width: 1
+            line_color: my_divider
+        - label:
+            id: selected_graph_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 8
+            y: 439
+            text: "PM2.5"
+        - label:
+            id: selected_graph_meta
+            align: TOP_RIGHT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: -8
+            y: 439
+            text: "STEADY"
+        - label:
+            id: selected_graph_value
+            align: TOP_LEFT
+            text_font: montserrat_16
+            text_color: my_white
+            x: 8
+            y: 458
+            text: "0.0 ug/m3"
+        - canvas:
+            id: selected_graph
+            align: TOP_LEFT
+            x: 6
+            y: 482
+            width: 168
+            height: 84
+        - obj:
+            id: footer_panel
+            x: 5
+            y: 575
+            width: 170
+            height: 54
+            bg_color: my_footer_panel
+            border_width: 1
+            border_color: my_divider
+        - label:
+            id: footer_primary_label
+            align: TOP_LEFT
+            text_font: montserrat_16
+            text_color: my_white
+            long_mode: WRAP
+            x: 12
+            y: 584
+            width: 156
+            text: "Air quality steady"
+        - label:
+            id: footer_secondary_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            long_mode: WRAP
+            x: 12
+            y: 607
+            width: 156
+            text: "Comfort OK | P steady"
+    - id: trends_page
+      bg_color: my_black
+      scrollbar_mode: "OFF"
+      widgets:
+        - label:
+            id: trends_intro_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 8
+            y: 34
+            text: "Swipe for pages"
+        - label:
+            id: trends_pm_title
+            align: TOP_LEFT
+            text_font: montserrat_14
+            text_color: my_label
+            x: 8
+            y: 56
+            text: "PM2.5"
+        - label:
+            id: trends_pm_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -8
+            y: 56
+            text: "0.0 ug/m3"
+        - canvas:
+            id: pm25_graph_large
+            align: TOP_LEFT
+            x: 5
+            y: 78
+            width: 170
+            height: 120
+        - label:
+            id: trends_voc_title
+            align: TOP_LEFT
+            text_font: montserrat_14
+            text_color: my_label
+            x: 8
+            y: 213
+            text: "VOC"
+        - label:
+            id: trends_voc_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -8
+            y: 213
+            text: "0 IDX"
+        - canvas:
+            id: voc_graph_large
+            align: TOP_LEFT
+            x: 5
+            y: 235
+            width: 170
+            height: 120
+        - obj:
+            id: trends_info_panel
+            x: 5
+            y: 372
+            width: 170
+            height: 76
+            bg_color: my_footer_panel
+            border_width: 1
+            border_color: my_divider
+        - label:
+            id: trends_pressure_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 382
+            text: "PRESSURE TREND"
+        - label:
+            id: trends_pressure_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -12
+            y: 380
+            text: "Stable"
+        - label:
+            id: trends_voc_quality_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 410
+            text: "VOC QUALITY"
+        - label:
+            id: trends_voc_quality_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -12
+            y: 408
+            text: "Normal"
+        - obj:
+            id: trends_summary_panel
+            x: 5
+            y: 464
+            width: 170
+            height: 112
+            bg_color: my_footer_panel
+            border_width: 1
+            border_color: my_divider
+        - label:
+            id: trends_summary_primary
+            align: TOP_LEFT
+            text_font: montserrat_16
+            text_color: my_white
+            long_mode: WRAP
+            x: 12
+            y: 474
+            width: 152
+            text: "Air quality steady"
+        - label:
+            id: trends_summary_secondary
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            long_mode: WRAP
+            x: 12
+            y: 506
+            width: 152
+            text: "Comfort OK | P steady"
+        - label:
+            id: trends_hint_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 548
+            width: 152
+            text: "Tap charts to refresh"
+    - id: status_page
+      bg_color: my_black
+      scrollbar_mode: "OFF"
+      widgets:
+        - obj:
+            id: status_air_panel
+            x: 5
+            y: 44
+            width: 170
+            height: 128
+            bg_color: my_footer_panel
+            border_width: 1
+            border_color: my_divider
+        - label:
+            id: status_air_title
+            align: TOP_LEFT
+            text_font: montserrat_14
+            text_color: my_label
+            x: 12
+            y: 54
+            text: "AIR STATUS"
+        - label:
+            id: status_alert_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 82
+            text: "Alert"
+        - label:
+            id: status_alert_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -12
+            y: 80
+            text: "Stable"
+        - label:
+            id: status_voc_quality_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 108
+            text: "VOC Quality"
+        - label:
+            id: status_voc_quality_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -12
+            y: 106
+            text: "Normal"
+        - label:
+            id: status_pressure_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 134
+            text: "Pressure"
+        - label:
+            id: status_pressure_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -12
+            y: 132
+            text: "Stable"
+        - obj:
+            id: status_system_panel
+            x: 5
+            y: 188
+            width: 170
+            height: 144
+            bg_color: my_footer_panel
+            border_width: 1
+            border_color: my_divider
+        - label:
+            id: status_system_title
+            align: TOP_LEFT
+            text_font: montserrat_14
+            text_color: my_label
+            x: 12
+            y: 198
+            text: "SYSTEM"
+        - label:
+            id: status_api_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 226
+            text: "API"
+        - label:
+            id: status_api_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -12
+            y: 224
+            text: "Waiting"
+        - label:
+            id: status_wifi_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 252
+            text: "Wi-Fi"
+        - label:
+            id: status_wifi_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -12
+            y: 250
+            text: "-- dBm"
+        - label:
+            id: status_uptime_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 278
+            text: "Uptime"
+        - label:
+            id: status_uptime_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -12
+            y: 276
+            text: "0m"
+        - obj:
+            id: status_control_panel
+            x: 5
+            y: 348
+            width: 170
+            height: 112
+            bg_color: my_footer_panel
+            border_width: 1
+            border_color: my_divider
+        - label:
+            id: status_control_title
+            align: TOP_LEFT
+            text_font: montserrat_14
+            text_color: my_label
+            x: 12
+            y: 358
+            text: "MODES"
+        - label:
+            id: status_led_mode_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 386
+            text: "LED Mode"
+        - label:
+            id: status_led_mode_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -12
+            y: 384
+            text: "Auto"
+        - label:
+            id: status_display_mode_label
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            x: 12
+            y: 412
+            text: "Display"
+        - label:
+            id: status_display_mode_value
+            align: TOP_RIGHT
+            text_font: montserrat_14
+            text_color: my_white
+            x: -12
+            y: 410
+            text: "Adaptive"
+        - obj:
+            id: status_hint_panel
+            x: 5
+            y: 476
+            width: 170
+            height: 98
+            bg_color: my_footer_panel
+            border_width: 1
+            border_color: my_divider
+        - label:
+            id: status_hint_title
+            align: TOP_LEFT
+            text_font: montserrat_14
+            text_color: my_label
+            x: 12
+            y: 486
+            text: "TOUCH"
+        - label:
+            id: status_hint_text
+            align: TOP_LEFT
+            text_font: montserrat_12
+            text_color: my_unit
+            long_mode: WRAP
+            x: 12
+            y: 514
+            width: 150
+            text: "Swipe left or right to change pages. Tap the clock to switch 24h mode."
